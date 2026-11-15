@@ -4,7 +4,7 @@ services:
   mosquitto:
     image: eclipse-mosquitto:2.0.22
     entrypoint: ["/bin/sh", "/mosquitto/entrypoint.sh"]
-    env_file: .env
+    env_file: ${IOT_ENV_FILE:-.env}
     # All host interfaces: needed for ESP32 on the LAN. Development only.
     ports:
       - "1883:1883"

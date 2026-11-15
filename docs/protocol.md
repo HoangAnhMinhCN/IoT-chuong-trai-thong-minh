@@ -197,9 +197,9 @@ Chế độ `AUTH_MODE=none` (giống demo cũ) bỏ toàn bộ phần này: bro
 
 ## 9. Giới hạn đã biết
 
-- Không có TLS: ai nghe được mạng LAN đều thấy mật khẩu và dữ liệu. Chỉ dùng trên LAN phát triển tin cậy.
+- ESP32 kết nối MQTT trực tiếp qua LAN phát triển tin cậy bằng plaintext. Backend từ xa có thể kết nối qua TLS bằng listener trong `deployment/compose.tunnel.yaml`.
 - `hw_id` là địa chỉ MAC, có thể bị giả mạo. Vì vậy mặc định cần admin duyệt; `AUTO_APPROVE` chỉ dành cho phát triển.
 - Tài khoản `bootstrap` dùng chung: lộ mật khẩu này chỉ cho phép gửi yêu cầu đăng ký và đọc trạng thái duyệt, không đọc được mật khẩu hay dữ liệu thiết bị khác. Thiết bị bootstrap có thể gửi request mang `hw_id` của máy khác; vì vậy admin duyệt theo `hw_id` in ra trên serial của board.
 - ESP32 dùng `umqtt.simple` với clean session: lệnh gửi khi thiết bị offline sẽ mất.
-- OTA chỉ được bảo vệ bởi ACL của broker (chỉ backend publish được `cmd`); chưa ký manifest, chưa TLS.
+- OTA dựa vào ACL của broker (chỉ backend publish được `cmd`). Với cấu hình tunnel, TLS bảo vệ kết nối từ backend tới broker. Manifest chưa có chữ ký.
   Ai có tài khoản `backend` là nạp được code vào thiết bị.

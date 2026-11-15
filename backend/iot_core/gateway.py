@@ -56,7 +56,8 @@ class DeviceGateway:
         from .telemetry import SqliteTelemetryStore
         transport = MqttTransport(config.broker_host, config.broker_port,
                                   username=config.username, password=config.password,
-                                  client_id=config.client_id_prefix, connect_timeout_s=config.connect_timeout_s)
+                                  client_id=config.client_id_prefix, connect_timeout_s=config.connect_timeout_s,
+                                  tls=config.broker_tls)
         return cls(config, transport=transport, registry=SqliteDeviceRegistry(config.db_path),
                    telemetry=SqliteTelemetryStore(config.db_path),
                    broker_auth=DynSecAuth(transport) if config.auth_mode == AuthMode.DYNSEC else NoAuth())

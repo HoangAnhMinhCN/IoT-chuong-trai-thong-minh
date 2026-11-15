@@ -33,6 +33,44 @@ Hotspot laptop có thể không có Internet: khi đó NTP lỗi, thiết bị g
 Nếu COM3 báo "A device attached to the system is not functioning", rút/cắm lại USB, dùng cáp/cổng tốt hơn
 (Wi-Fi của ESP32 hút dòng mạnh, cáp yếu làm chip USB-UART chập chờn).
 
+## MQTT qua TLS và Laptop Tunnel
+
+`deployment/compose.yaml` chạy broker LAN như trong phần chạy nhanh. Backend mặc định
+kết nối `127.0.0.1:1883` theo `deployment/.env.example`. Máy có Laptop Tunnel có thể
+chọn thêm `deployment/compose.tunnel.yaml`. Cấu hình này publish TLS trên IP WireGuard
+và cổng được VPS chuyển tiếp, đồng thời giữ MQTT plaintext ở `127.0.0.1:1883`.
+ESP32 ở hotspot laptop tiếp tục dùng MQTT trực tiếp tại `IOT_LAN_BIND_IP:1883`.
+
+Trên máy có tunnel, đặt các biến sau trong `deployment/tunnel.local.ps1` (Git bỏ qua).
+Thay IP, cổng và tên miền bằng thông số của tunnel. `IOT_ENV_FILE` có thể trỏ tới
+đường dẫn tuyệt đối của `.env` ở checkout đang cung cấp cấu hình broker.
+
+```powershell
+$env:IOT_LAN_BIND_IP = '192.168.137.1'
+$env:IOT_TUNNEL_BIND_IP = '10.0.0.2'
+$env:IOT_TUNNEL_PORT = '20001'
+$env:IOT_BROKER_HOST = 'mqtt.example.com'
+$env:IOT_BROKER_PORT = $env:IOT_TUNNEL_PORT
+$env:IOT_BROKER_TLS = '1'
+```
+
+Tạo bản ghi DNS only cho hostname MQTT trỏ về VPS. Cấp chứng chỉ bằng DNS-01 nếu
+Docker volume `iot-mqtt-tls` chưa có chứng chỉ. Làm theo yêu cầu TXT của Certbot trước
+khi chạy Compose.
+
+```powershell
+. ./deployment/tunnel.local.ps1
+$hook = 'install -m 644 $RENEWED_LINEAGE/fullchain.pem /tls/fullchain.pem && install -o 1883 -g 1883 -m 640 $RENEWED_LINEAGE/privkey.pem /tls/privkey.pem'
+docker run --rm -it -v iot-mqtt-acme:/etc/letsencrypt -v iot-mqtt-tls:/tls certbot/certbot certonly --manual --preferred-challenges dns --key-type rsa --preferred-chain 'ISRG Root X1' --cert-name $env:IOT_BROKER_HOST -d $env:IOT_BROKER_HOST --deploy-hook $hook
+docker compose -f deployment/compose.yaml -f deployment/compose.tunnel.yaml up -d --wait
+```
+
+Để backend dùng địa chỉ công cộng, khởi động backend từ terminal đã nạp
+`tunnel.local.ps1`. Để tắt listener tunnel, chạy lại Compose chỉ với
+`deployment/compose.yaml`. Gia hạn thủ công bằng
+lệnh Certbot trên trước khi chứng chỉ hết hạn, sau đó chạy lại Compose với
+`up -d --force-recreate --wait` để Mosquitto nạp chứng chỉ mới.
+
 ## Demo MQTT
 
 Mã nguồn và hướng dẫn chạy demo cũ (broker anonymous) nằm trong [demo/README.md](demo/README.md).
