@@ -1,4 +1,11 @@
-from vision.analyzer import PetBehaviorAnalyzer, BehaviorState
+import pytest
+
+# vision/__init__.py nạp cả detector (ultralytics) và streamer (cv2):
+# bỏ qua khi máy chưa cài bộ thư viện camera.
+for _module in ("numpy", "cv2", "ultralytics"):
+    pytest.importorskip(_module, reason=f"cần {_module} (thư viện camera)")
+
+from vision.analyzer import PetBehaviorAnalyzer, BehaviorState  # noqa: E402
 
 
 def test_initial_state_absent():
