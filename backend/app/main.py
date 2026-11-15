@@ -11,16 +11,41 @@ from dataclasses import asdict, is_dataclass
 from datetime import datetime, timezone
 from uuid import uuid4
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, Optional
 
-from fastapi import FastAPI, HTTPException, Query, Request
+
+from fastapi import FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.encoders import jsonable_encoder
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
+from fastapi import Depends
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from pydantic import BaseModel, Field
+
+
+from sqlalchemy.orm import Session
+
+
+from .database import SessionLocal, get_db, init_db
+from .database import test_db_connection
+from .schemas import (
+    UserRegisterSchema,
+    LoginSchema,
+    ChangePasswordSchema,
+    TokenResponse,
+    UserResponse,
+    UserUpdateSchema,
+)
+from .services import alert, audit, barn, user, auth, command
+
 from iot_core import (BrokerAuthError, CommandFailed, CommandTimeout, DeviceGateway,
                       DeviceNotFound, DeviceOffline, GatewayConfig, InvalidState,
                       RegistrationNotFound, RegistrationStatus)
+
+from . import models
+
+from . import schemas
 
 
 def public(value: Any) -> Any:
@@ -36,7 +61,11 @@ def public(value: Any) -> Any:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    env_file = os.environ.get("IOT_ENV_FILE", str(Path(__file__).resolve().parents[2] / "deployment/.env"))
+    if test_db_connection():
+        print("Database is ready.")
+    else:
+        print("Database is unavailable.")
+    env_file = os.environ.get("IOT_ENV_FILE", str(Path(__file__).resolve().parents[2] / "deployment/.env.example"))
     async with DeviceGateway.from_config(GatewayConfig.from_env(env_file)) as gateway:
         app.state.gateway = gateway
         app.state.firmware_jobs = {}
@@ -273,3 +302,392 @@ async def events(request: Request):
                 unsubscribe()
 
     return StreamingResponse(stream(), media_type="text/event-stream", headers={"Cache-Control": "no-cache"})
+
+
+#Log in, log out, register account, change password
+
+security = HTTPBearer(auto_error=True)
+
+
+
+
+
+# =========================================
+# AUTHENTICATION
+# =========================================
+
+def get_current_user(
+    credentials: HTTPAuthorizationCredentials = Depends(security),
+    db: Session = Depends(get_db)
+):
+    return auth.get_current_user(
+        db,
+        credentials.credentials
+    )
+
+
+def require_roles(*roles):
+    def role_checker(
+        current_user: models.User = Depends(get_current_user)
+    ):
+        if current_user.role not in roles:
+            raise HTTPException(
+                status_code=403,
+                detail="Permission denied"
+            )
+
+        return current_user
+
+    return role_checker
+
+
+def check_barn_access(
+    barn_id: str,
+    current_user: models.User,
+    db: Session,
+    write: bool = False
+):
+    if current_user.role == "Admin":
+        return True
+
+    assignment = db.query(
+        models.BarnAssignment
+    ).filter(
+        models.BarnAssignment.user_id == current_user.id,
+        models.BarnAssignment.barn_id == barn_id
+    ).first()
+
+    if not assignment:
+        raise HTTPException(
+            status_code=403,
+            detail="You do not have access to this barn"
+        )
+
+    if write and (
+        current_user.role != "Operator"
+        or assignment.access_level != "Operator"
+    ):
+        raise HTTPException(
+            status_code=403,
+            detail="Write permission required"
+        )
+
+    return True
+
+# =========================================
+# WEBSOCKET MANAGER
+# =========================================
+
+class ConnectionManager:
+
+    def __init__(self):
+        self.connections = {}
+
+    async def connect(self, websocket: WebSocket, user_id: str):
+        await websocket.accept()
+
+        self.connections.setdefault(user_id, []).append(websocket)
+
+    def disconnect(self, websocket: WebSocket, user_id: str):
+        connections = self.connections.get(user_id, [])
+
+        if websocket in connections:
+            connections.remove(websocket)
+
+        if not connections:
+            self.connections.pop(user_id, None)
+
+    async def send_to_user(self, user_id: str, data: dict):
+        connections = self.connections.get(user_id, [])
+
+        disconnected = []
+
+        for connection in connections:
+            try:
+                await connection.send_json(data)
+            except Exception:
+                disconnected.append(connection)
+
+        for connection in disconnected:
+            self.disconnect(connection, user_id)
+
+
+manager = ConnectionManager()
+
+# =========================================
+# 1. AUTHENTICATION ENDPOINTS
+# =========================================
+
+@app.post("/auth/login", response_model=schemas.TokenResponse)
+def login(
+    body: schemas.LoginSchema,
+    db: Session = Depends(get_db)
+):
+    return auth.login(db, body)
+
+
+@app.post("/auth/refresh")
+def refresh_token(
+    body: schemas.RefreshTokenSchema,
+    db: Session = Depends(get_db)
+):
+    return auth.refresh_token(db, body)
+
+
+@app.post("/auth/logout")
+def logout(
+    body: schemas.RefreshTokenSchema,
+    current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    return auth.logout(
+        db,
+        body.refresh_token,
+        current_user
+    )
+
+
+@app.put("/me/password")
+def change_password(
+    body: schemas.ChangePasswordSchema,
+    current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    return auth.change_password(
+        db,
+        body,
+        current_user
+    )
+
+# =========================================
+# 2. USER MANAGEMENT
+# =========================================
+
+@app.get("/users", response_model=list[schemas.UserResponse])
+def get_users(
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(require_roles("Admin"))
+):
+    return user.get_users(db)
+
+
+@app.post(
+    "/users",
+    response_model=schemas.UserResponse,
+    status_code=201
+)
+def create_user(
+    body: schemas.UserRegisterSchema,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(require_roles("Admin"))
+):
+    return user.create_user(
+        db,
+        body
+    )
+
+
+@app.patch("/users/{user_id}", response_model=schemas.UserResponse)
+def update_user(
+    user_id: str,
+    body: schemas.UserUpdateSchema,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(require_roles("Admin"))
+):
+    if user_id == current_user.id and body.status == "locked":
+        raise HTTPException(400, "Cannot lock your own account")
+
+    return user.update_user(db, user_id, body)
+
+# =========================================
+# 3. BARN MANAGEMENT
+# =========================================
+
+@app.get("/barns", response_model=list[schemas.BarnResponse])
+def get_barns(
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user)
+):
+    return barn.get_barns(db, current_user)
+
+
+@app.post(
+    "/barns",
+    response_model=schemas.BarnResponse,
+    status_code=201
+)
+def create_barn(
+    body: schemas.BarnCreateSchema,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(require_roles("Admin"))
+):
+    return barn.create_barn(db, body)
+
+
+@app.put("/barns/{barn_id}/assignments")
+def assign_barn(
+    barn_id: str,
+    body: schemas.BarnAssignmentSchema,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(require_roles("Admin"))
+):
+    return barn.assign_users(db, barn_id, body)
+# =========================================
+# 6. COMMANDS
+# =========================================
+
+@app.post("/barns/{barn_id}/commands", status_code=201)
+async def send_command(
+    barn_id: str,
+    body: schemas.CommandCreateSchema,
+    request: Request,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user)
+):
+    check_barn_access(
+        barn_id,
+        current_user,
+        db,
+        write=True
+    )
+
+    result = command.send_command(
+        db,
+        barn_id,
+        current_user.id,
+        body
+    )
+
+    return {
+        "command_id": result.command_id,
+        "status": result.status
+    }
+
+
+@app.get("/barns/{barn_id}/commands")
+def get_commands(
+    barn_id: str,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user)
+):
+    check_barn_access(barn_id, current_user, db)
+
+    return command.get_commands(db, barn_id)
+# =========================================
+# 8. ALERTS
+# =========================================
+
+@app.get("/alerts", response_model=list[schemas.AlertResponse])
+def get_alerts(
+    status_filter: Optional[str] = Query(None, alias="status"),
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user)
+):
+    return alert.get_alerts(
+        db,
+        current_user,
+        status_filter
+    )
+
+
+@app.post("/alerts/{alert_id}/ack")
+def acknowledge_alert(
+    alert_id: str,
+    body: schemas.AlertActionSchema,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(
+        require_roles("Admin", "Operator")
+    )
+):
+    return alert.acknowledge_alert(
+        db,
+        alert_id,
+        current_user,
+        body.note
+    )
+
+
+@app.post("/alerts/{alert_id}/close")
+def close_alert(
+    alert_id: str,
+    body: schemas.AlertActionSchema,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(
+        require_roles("Admin", "Operator")
+    )
+):
+    return alert.close_alert(
+        db,
+        alert_id,
+        current_user,
+        body.note
+    )
+# =========================================
+# 9. AUDIT LOGS
+# =========================================
+
+@app.get(
+    "/audit-logs",
+    response_model=list[schemas.AuditLogResponse]
+)
+def get_audit_logs(
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(require_roles("Admin"))
+):
+    return audit.get_audit_logs(db)
+
+# =========================================
+# 10. WEBSOCKET
+# =========================================
+@app.websocket("/ws")
+async def websocket_endpoint(websocket: WebSocket):
+    token = websocket.query_params.get("token")
+
+    if not token:
+        await websocket.close(code=1008)
+        return
+
+    db = SessionLocal()
+    user_id = None
+
+    try:
+        try:
+            current_user = auth.get_current_user(db, token)
+            user_id = current_user.id
+
+        except HTTPException:
+            await websocket.close(code=1008)
+            return
+
+        await manager.connect(websocket, user_id)
+
+        try:
+            while True:
+                await websocket.receive_text()
+
+        except WebSocketDisconnect:
+            pass
+
+    finally:
+        if user_id:
+            manager.disconnect(websocket, user_id)
+
+        db.close()
+
+
+# =========================================
+# HEALTH CHECK
+# =========================================
+
+@app.get("/health")
+def health_check():
+    return {
+        "status": "ok",
+        "service": "Smart Livestock IoT API"
+    }
+
+
+
+
+
+
