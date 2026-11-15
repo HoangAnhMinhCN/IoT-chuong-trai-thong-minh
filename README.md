@@ -12,6 +12,7 @@ py -3.11 venv .venv
 | Thư mục | Nội dung |
 | --- | --- |
 | [docs/protocol.md](docs/protocol.md) | Giao thức MQTT v1: topic, envelope, đăng ký thiết bị, lệnh, quyền broker |
+| [docs/remote-dev.md](docs/remote-dev.md) | Làm việc từ xa: chạy backend riêng qua `mqtt.xuanthieu.site`, điều khiển và OTA ESP32 |
 | [deployment/](deployment/compose.yaml) | Mosquitto 2.0.22 (Docker) với Dynamic Security, mỗi thiết bị một tài khoản |
 | [backend/](backend/README.md) | `iot_core` (`DeviceGateway`), server tạm FastAPI, simulator, test |
 | [firmware/](firmware/README.md) | Firmware MicroPython chia module, `tools/deploy.ps1` |
@@ -19,7 +20,8 @@ py -3.11 venv .venv
 Chạy nhanh (PowerShell, tại thư mục gốc):
 
 ```powershell
-Copy-Item deployment\.env.example deployment\.env   # rồi đổi hai mật khẩu
+# Chỉ chép khi chưa có .env (chép đè sẽ mất mật khẩu thật), rồi đổi hai mật khẩu
+if (-not (Test-Path deployment\.env)) { Copy-Item deployment\.env.example deployment\.env }
 docker compose -f deployment\compose.yaml up -d --wait
 Set-Location backend; .venv\Scripts\python.exe -m uvicorn app.main:app --host 0.0.0.0 --port 8000
 ```

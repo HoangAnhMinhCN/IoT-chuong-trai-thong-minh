@@ -326,10 +326,17 @@ class DeviceGateway:
             await handle_request(self, info.key, data)
             return
         device = await self.registry.get_device(info.key)
+        now = datetime.now(timezone.utc)
+        if device is None and self.config.adopt_devices and info.kind == protocol.META:
+            # Remote/secondary backend: learn approved devices from their retained meta. Only the
+            # device itself (or a backend account) may publish there, per the broker ACL.
+            hw_id = data.get("hw_id")
+            if isinstance(hw_id, str) and hw_id:
+                device = Device(device_id=info.key, hw_id=hw_id, name=info.key, registered_at=now)
+                logging.getLogger("iot_core").info("Adopted device %s from meta", info.key)
         if device is None:
             logging.getLogger("iot_core").debug("Unknown device on %s", topic)
             return
-        now = datetime.now(timezone.utc)
         if info.kind == protocol.STATUS:
             if data.get("state") not in ("online", "offline"):
                 logging.getLogger("iot_core").warning("Invalid status on %s", topic)

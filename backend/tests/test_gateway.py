@@ -223,3 +223,130 @@ async def test_read_sensor_and_interval(gateway):
             await gateway.set_interval(device_id, seconds)
     assert await gateway.set_interval(device_id, 3) == 3
     assert (await gateway.get_device(device_id)).interval_s == 3
+
+
+@pytest.fixture
+async def adopting_gateway(tmp_path):
+    from conftest import FakeTransport
+    from iot_core import AuthMode, DeviceGateway, GatewayConfig
+    from iot_core.broker_auth import NoAuth
+    from iot_core.registry import SqliteDeviceRegistry
+    from iot_core.telemetry import SqliteTelemetryStore
+
+    path = tmp_path / 'nested/iot.db'
+    gw = DeviceGateway(GatewayConfig(auth_mode=AuthMode.NONE, adopt_devices=True),
+                       transport=FakeTransport(), registry=SqliteDeviceRegistry(path),
+                       telemetry=SqliteTelemetryStore(path), broker_auth=NoAuth())
+    async with gw:
+        yield gw
+
+
+async def test_unknown_meta_ignored_by_default(gateway):
+    updates = []
+    gateway.on_device_updated(updates.append)
+    assert gateway.config.adopt_devices is False
+    topic = p.device_topic('remote-device', p.META)
+    payload = p.Envelope(p.META, {'hw_id': '112233445566', 'model': 'esp32'}).encode()
+    # Retained delivery and normal delivery use the same handler signature.
+    for _ in range(2):
+        await gateway._message(topic, payload)
+        assert await gateway.registry.list_devices() == []
+        assert updates == []
+
+
+async def test_adopt_meta_lists_device_and_supports_commands(adopting_gateway):
+    gw = adopting_gateway
+    updates = []
+    gw.on_device_updated(updates.append)
+    device_id = 'remote-device'
+    meta = {'hw_id': '112233445566', 'model': 'esp32', 'fw': '2.3',
+            'commands': ['read', 'set_interval'], 'interval_s': 17,
+            'sensors': [{'name': 'room', 'driver': 'dht',
+                         'fields': {'temperature': 'C', 'humidity': '%'}}]}
+    before = datetime.now(timezone.utc)
+    await gw._message(p.device_topic(device_id, p.META), p.Envelope(p.META, meta).encode())
+    after = datetime.now(timezone.utc)
+
+    device = await gw.get_device(device_id)
+    assert device.device_id == device_id
+    assert device.hw_id == meta['hw_id']
+    assert device.name == device_id
+    assert device.registered_at is not None
+    assert before <= device.registered_at <= after
+    assert device.model == meta['model']
+    assert device.fw == meta['fw']
+    assert device.commands == meta['commands']
+    assert device.interval_s == meta['interval_s']
+    assert [sensor.to_dict() for sensor in device.sensors] == meta['sensors']
+    assert updates == [device]
+    assert await gw.list_devices() == [device]
+
+    with pytest.raises(DeviceOffline):
+        await gw.send_command(device_id, 'read')
+    assert gw.transport.published == []
+    await gw._message(p.device_topic(device_id, p.STATUS),
+                      p.Envelope(p.STATUS, {'state': 'online'}).encode())
+
+    async def respond(topic, payload):
+        assert topic == p.device_topic(device_id, p.CMD)
+        command = p.Envelope.decode(payload)
+        assert command.data['name'] == 'read'
+        assert command.data['args'] == {'sensor': 'room'}
+        await gw._message(p.device_topic(device_id, p.RESP), p.Envelope(p.RESP, {
+            're': command.id, 'ok': True,
+            'result': {'readings': {'room': {'temperature': 24}}}}).encode())
+
+    gw.transport.on_publish = respond
+    assert await gw.send_command(device_id, 'read', {'sensor': 'room'}, timeout_s=1) == {
+        'readings': {'room': {'temperature': 24}}}
+    assert len(gw.transport.published) == 1
+    assert gw.transport.published[0][2:] == (1, False)
+    assert gw._pending == {}
+
+
+@pytest.mark.parametrize('meta', [{}, {'hw_id': ''}, {'hw_id': None},
+                                 {'hw_id': 123}, {'hw_id': True},
+                                 {'hw_id': []}, {'hw_id': {}}],
+                         ids=['missing', 'empty', 'null', 'number', 'bool', 'list', 'dict'])
+async def test_adopt_meta_requires_nonempty_string_hw_id(adopting_gateway, meta):
+    updates = []
+    adopting_gateway.on_device_updated(updates.append)
+    await adopting_gateway._message(p.device_topic('remote-device', p.META),
+                                    p.Envelope(p.META, meta).encode())
+    assert await adopting_gateway.registry.list_devices() == []
+    assert updates == []
+
+
+@pytest.mark.parametrize('kind, data', [
+    (p.STATUS, {'hw_id': '112233445566', 'state': 'online'}),
+    (p.TELEMETRY, {'hw_id': '112233445566', 'readings': {'room': {'temperature': 24}}}),
+])
+async def test_adopt_ignores_unknown_non_meta(adopting_gateway, kind, data):
+    gw = adopting_gateway
+    updates, statuses, telemetry = [], [], []
+    gw.on_device_updated(updates.append)
+    gw.on_status_change(statuses.append)
+    gw.on_telemetry(telemetry.append)
+    await gw._message(p.device_topic('remote-device', kind), p.Envelope(kind, data).encode())
+    assert await gw.registry.list_devices() == []
+    assert await gw.telemetry.latest('remote-device') is None
+    assert updates == statuses == telemetry == []
+
+
+async def test_adopt_meta_preserves_known_device_identity(adopting_gateway):
+    gw = adopting_gateway
+    device_id = await online_device(gw)
+    original = await gw.get_device(device_id)
+    updates = []
+    gw.on_device_updated(updates.append)
+    meta = {'hw_id': '112233445566', 'name': 'Replacement', 'model': 'new-model', 'fw': '9'}
+    await gw._message(p.device_topic(device_id, p.META), p.Envelope(p.META, meta).encode())
+    device = await gw.get_device(device_id)
+    assert device.device_id == original.device_id
+    assert device.hw_id == original.hw_id
+    assert device.name == original.name == 'Room'
+    assert device.registered_at == original.registered_at
+    assert device.online is True
+    assert device.model == 'new-model' and device.fw == '9'
+    assert await gw.list_devices() == [device]
+    assert updates == [device]
