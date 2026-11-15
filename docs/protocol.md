@@ -146,12 +146,22 @@ Envelope `id` của lệnh dùng làm mã ghép phản hồi. Thiết bị bỏ 
 | `read` | `{"sensor": "room"}` hoặc `{}` (tất cả) | giống `data` của telemetry |
 | `set_interval` | `{"seconds": 10}` (1–3600) | `{"interval_s": 10}`; thiết bị lưu vào flash |
 | `reboot` | — | `{}`; thiết bị trả lời, publish `offline` (`reboot`), rồi reset sau ~1 s |
-| `servo_set` | `{"name": "servo", "angle": 90}` (0–180; `name` bỏ được khi chỉ có 1 actuator) | trạng thái servo; dừng chuỗi góc nếu đang chạy |
+| `actuator_state` | `{"name": "relay"}` hoặc `{}` (tất cả) | trạng thái 1 actuator, hoặc `{"servo": {…}, "relay": {…}}`; chỉ đọc |
+| `servo_set` | `{"name": "servo", "angle": 90}` (0–180; `name` bỏ được khi chỉ có 1 servo) | trạng thái servo; dừng chuỗi góc nếu đang chạy |
 | `servo_sequence` | `{"name": "servo", "run": true, "angles": [0, 20, …, 180], "step_ms": 1000}` (`angles`, `step_ms` tùy chọn; `run: false` để dừng) | trạng thái servo |
 
 Trạng thái servo: `{"angle": 40, "running": true, "angles": [0, 20, …, 180], "step_ms": 1000}`.
 Chuỗi góc chạy bằng hardware timer trên thiết bị (không phụ thuộc kết nối mạng) và lặp vô hạn; cấu hình
 khởi động nằm trong `config.json` (`sequence.autostart`). Thay đổi bằng lệnh không lưu qua lần khởi động lại.
+
+| Lệnh | `args` | `result` |
+| --- | --- | --- |
+| `relay_set` | `{"name": "relay", "on": true, "duration_ms": 5000}` (`duration_ms` tùy chọn, 100–86400000, chỉ khi bật; `name` bỏ được khi chỉ có 1 relay) | trạng thái relay |
+
+Trạng thái relay: `{"on": true, "off_in_ms": 4200}` (`off_in_ms` chỉ có khi đang hẹn tự tắt).
+Cấu hình: `{"driver": "relay", "name": "relay", "pin": 25, "active_low": false, "initial": false, "max_on_ms": 0}`.
+`active_low: true` cho module relay kích mức thấp. Khi khởi động relay luôn về `initial` (mặc định tắt);
+`max_on_ms` > 0 giới hạn thời gian bật tối đa. Gửi lệnh `servo_*` tới relay (hoặc ngược lại) trả `actuator_not_found`.
 
 ### Nạp code qua Wi-Fi (OTA)
 

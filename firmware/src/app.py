@@ -70,14 +70,12 @@ class App:
                 actuator.running = False
                 print("Actuator", actuator.name, "stopped:", exc)
 
-    def actuator(self, name=None):
-        """Actuator by name; name may be omitted when exactly one is configured."""
-        if name is None and len(self.actuators) == 1:
-            return self.actuators[0]
-        for actuator in self.actuators:
-            if actuator.name == name:
-                return actuator
-        return None
+    def actuator(self, name=None, driver=None):
+        """Actuator by name (and driver); name may be omitted when exactly one matches."""
+        matches = [actuator for actuator in self.actuators
+                   if (driver is None or actuator.driver == driver)
+                   and (name is None or actuator.name == name)]
+        return matches[0] if len(matches) == 1 else None
 
     def uptime_s(self):
         return time.ticks_diff(time.ticks_ms(), self.started_at) // 1000

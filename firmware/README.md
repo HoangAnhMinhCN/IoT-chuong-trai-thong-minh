@@ -23,7 +23,7 @@ khởi động board tự quay về bản cũ (`ota_status.rolled_back_from`). `
 
 1. Chép `config.example.json` thành `src/config.json`; nhập Wi-Fi, MQTT host và
    mật khẩu bootstrap được quản trị viên cung cấp. Không commit file cấu hình thật.
-   DHT11 dùng GPIO14 (G34–39 chỉ đọc vào, không dùng được); servo SG90 ở G26 cần nguồn 5 V ≥ 2 A.
+   DHT11 dùng GPIO25 (G34–39 chỉ đọc vào, không dùng được); servo SG90 ở G14 cần nguồn 5 V ≥ 2 A; relay ở G26.
 2. Nạp lần đầu qua USB như trên.
 3. Lần khởi động đầu, xem `hw_id` trên serial và chờ quản trị viên duyệt đăng ký.
    Firmware lưu mật khẩu ngẫu nhiên một lần trong `/device.json`; khi được duyệt,

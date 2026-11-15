@@ -18,7 +18,7 @@
     {
       "driver": "dht11",
       "name": "room",
-      "pin": 14
+      "pin": 25
     },
     {
       "driver": "simulated",
@@ -29,7 +29,7 @@
     {
       "driver": "servo",
       "name": "servo",
-      "pin": 26,
+      "pin": 14,
       "min_us": 500,
       "max_us": 2400,
       "sequence": {
@@ -51,6 +51,14 @@
       "max_dps": 360,
       "detach_ms": 300,
       "start_delay_ms": 8000
+    },
+    {
+      "driver": "relay",
+      "name": "relay",
+      "pin": 26,
+      "active_low": false,
+      "initial": false,
+      "max_on_ms": 0
     }
   ]
 }

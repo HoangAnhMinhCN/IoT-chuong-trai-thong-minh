@@ -1,0 +1,272 @@
+<!doctype html>
+<html lang="vi">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark">
+<title>Điều khiển servo</title>
+<style>
+  * { box-sizing: border-box; }
+  body { margin: 0; padding: 24px 16px; background: #091421; color: #eff7ff;
+         font: 16px system-ui, sans-serif; }
+  main { max-width: 420px; margin: auto; padding: 24px; border: 1px solid #28415a;
+         border-radius: 24px; background: #14283d; text-align: center; }
+  h1 { margin: 0; font-size: 1.45rem; }
+  p { color: #c0d1e3; }
+  canvas { display: block; width: 100%; max-width: 300px; height: auto; margin: 20px auto 0; }
+  output { font-size: 3.1rem; font-weight: 750; font-variant-numeric: tabular-nums; }
+  label { display: block; margin-top: 18px; text-align: left; }
+  input { width: 100%; height: 44px; margin: 0; accent-color: #74dcff; cursor: pointer; }
+  .scale, .presets { display: flex; justify-content: space-between; gap: 6px; }
+  .scale { font-size: .8rem; color: #b8cce0; }
+  .presets { margin-top: 18px; }
+  button { flex: 1; min-height: 44px; padding: 4px; border: 1px solid #41607e;
+           border-radius: 10px; background: #233f5a; color: inherit; font: inherit; cursor: pointer; }
+  button:focus-visible, input:focus-visible { outline: 2px solid #9eeaff; outline-offset: 3px; }
+  #status { min-height: 2.7em; margin-bottom: 0; }
+  #status[data-error="true"] { color: #ffb5ab; }
+  .sensors { margin-top: 18px; padding-top: 16px; border-top: 1px solid #28415a; }
+  .sensors h2 { margin: 0; font-size: 1rem; }
+  .readings { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin: 12px 0 0; }
+  .readings div { padding: 10px 4px; border-radius: 10px; background: #1e3851; }
+  dt, #reading-status { color: #c0d1e3; font-size: .8rem; }
+  dd { margin: 4px 0 0; font-size: 1.2rem; font-weight: 700; }
+  #reading-status { margin-bottom: 0; }
+  .relay { margin-top: 18px; padding-top: 16px; border-top: 1px solid #28415a; }
+  .relay h2 { margin: 0; font-size: 1rem; }
+  .relay-row { display: flex; align-items: center; gap: 12px; margin-top: 12px; }
+  .lamp { width: 22px; height: 22px; flex: none; border-radius: 50%; background: #3a4f63;
+          box-shadow: inset 0 0 0 2px #52687d; }
+  .lamp[data-on="true"] { background: #7dffb0; box-shadow: 0 0 14px #7dffb0; }
+  #relay-label { flex: 1; text-align: left; font-weight: 700; }
+  #relay-toggle[aria-pressed="true"] { background: #2f6b4b; border-color: #58b884; }
+  select { min-height: 44px; padding: 4px 8px; border: 1px solid #41607e; border-radius: 10px;
+           background: #233f5a; color: inherit; font: inherit; }
+  #relay-status { min-height: 1.4em; margin: 10px 0 0; font-size: .85rem; }
+  #relay-status[data-error="true"] { color: #ffb5ab; }
+</style>
+<main>
+  <h1>Điều khiển servo (G14)</h1>
+  <p>Kéo thanh trượt để xoay servo.</p>
+  <canvas id="dial" width="600" height="310" aria-hidden="true"></canvas>
+  <output id="target" for="angle" aria-live="off">90°</output>
+  <label for="angle">Góc mục tiêu</label>
+  <input id="angle" type="range" min="0" max="180" step="1" value="90">
+  <div class="scale" aria-hidden="true"><span>0°</span><span>90°</span><span>180°</span></div>
+  <div class="presets" aria-label="Góc đặt sẵn">
+    <button type="button" data-angle="0">0°</button>
+    <button type="button" data-angle="45">45°</button>
+    <button type="button" data-angle="90">90°</button>
+    <button type="button" data-angle="135">135°</button>
+    <button type="button" data-angle="180">180°</button>
+  </div>
+  <p id="status" role="status">Chưa gửi lệnh.</p>
+  <section class="sensors" aria-labelledby="sensor-title">
+    <h2>Cảm biến DHT11 (G25)</h2>
+    <dl class="readings">
+      <div><dt>Nhiệt độ</dt><dd id="temperature">—</dd></div>
+      <div><dt>Độ ẩm</dt><dd id="humidity">—</dd></div>
+    </dl>
+    <p id="reading-status">Đang tải số đo…</p>
+  </section>
+  <section class="relay" aria-labelledby="relay-title">
+    <h2 id="relay-title">Relay (G26)</h2>
+    <div class="relay-row">
+      <span class="lamp" id="relay-lamp" aria-hidden="true"></span>
+      <span id="relay-label">Chưa rõ</span>
+      <button type="button" id="relay-toggle" aria-pressed="false" disabled>Bật</button>
+    </div>
+    <div class="relay-row">
+      <label for="relay-duration" style="margin:0;flex:1">Tự tắt sau</label>
+      <select id="relay-duration">
+        <option value="">Không tự tắt</option>
+        <option value="5000">5 giây</option>
+        <option value="30000">30 giây</option>
+        <option value="300000">5 phút</option>
+      </select>
+    </div>
+    <p id="relay-status" role="status">Đang đọc trạng thái relay…</p>
+  </section>
+</main>
+<script>
+  const slider = document.querySelector("#angle");
+  const target = document.querySelector("#target");
+  const status = document.querySelector("#status");
+  const canvas = document.querySelector("#dial");
+  const dial = canvas.getContext("2d");
+  let pending = null;
+  let sending = false;
+  let lastSentAt = -Infinity;
+  const minSendInterval = 80;
+
+  function render() {
+    const angle = slider.valueAsNumber;
+    const radians = Math.PI + angle * Math.PI / 180;
+    target.value = angle + "°";
+    dial.clearRect(0, 0, canvas.width, canvas.height);
+    dial.lineCap = "round";
+    dial.lineWidth = 19;
+    dial.strokeStyle = "#294863";
+    dial.beginPath();
+    dial.arc(300, 272, 230, Math.PI, 2 * Math.PI);
+    dial.stroke();
+    dial.strokeStyle = "#74dcff";
+    dial.beginPath();
+    dial.arc(300, 272, 230, Math.PI, radians);
+    dial.stroke();
+    dial.strokeStyle = "#e7f8ff";
+    dial.lineWidth = 10;
+    dial.beginPath();
+    dial.moveTo(300, 272);
+    dial.lineTo(300 + 190 * Math.cos(radians), 272 + 190 * Math.sin(radians));
+    dial.stroke();
+    dial.fillStyle = "#74dcff";
+    dial.beginPath();
+    dial.arc(300, 272, 17, 0, 2 * Math.PI);
+    dial.fill();
+  }
+
+  async function sendAngle() {
+    pending = slider.valueAsNumber;
+    if (sending) return;
+    sending = true;
+    while (pending !== null) {
+      const delay = minSendInterval - (performance.now() - lastSentAt);
+      if (delay > 0) await new Promise(resolve => setTimeout(resolve, delay));
+      const angle = pending;
+      pending = null;
+      lastSentAt = performance.now();
+      status.dataset.error = "false";
+      status.textContent = "Đang gửi " + angle + "°…";
+      try {
+        const response = await fetch("/angle", {
+          method: "POST",
+          headers: {"Content-Type": "application/json"},
+          body: JSON.stringify({angle})
+        });
+        const result = await response.json();
+        if (!response.ok) throw new Error(result.error);
+        status.textContent = "ESP32 đã nhận góc " + angle + "°.";
+      } catch (error) {
+        status.dataset.error = "true";
+        status.textContent = "Gửi thất bại. " + error.message;
+      }
+    }
+    sending = false;
+  }
+
+  slider.addEventListener("input", () => {
+    render();
+    sendAngle();
+  });
+  for (const button of document.querySelectorAll("[data-angle]")) {
+    button.addEventListener("click", () => {
+      slider.value = button.dataset.angle;
+      render();
+      sendAngle();
+    });
+  }
+  render();
+
+  const temperature = document.querySelector("#temperature");
+  const humidity = document.querySelector("#humidity");
+  const readingStatus = document.querySelector("#reading-status");
+  const numberFormat = new Intl.NumberFormat("vi", {maximumFractionDigits: 2});
+  const formatReading = (value, unit) =>
+    Number.isFinite(value) ? numberFormat.format(value) + " " + unit : "—";
+
+  async function updateReadings() {
+    try {
+      const response = await fetch("/telemetry");
+      const sample = await response.json();
+      if (!response.ok) throw new Error(sample.error);
+      temperature.textContent = formatReading(sample?.temperature, "°C");
+      humidity.textContent = formatReading(sample?.humidity, "%");
+      if (sample?.sensor_error) {
+        readingStatus.textContent = "Lỗi đọc cảm biến: " + sample.sensor_error;
+      } else if (sample && (Number.isFinite(sample.temperature) || Number.isFinite(sample.humidity))) {
+        readingStatus.textContent = "Mẫu lúc " + new Date(sample.received_at).toLocaleTimeString("vi");
+      } else {
+        readingStatus.textContent = "Chưa có số đo nhiệt độ hoặc độ ẩm.";
+      }
+    } catch (error) {
+      temperature.textContent = humidity.textContent = "—";
+      readingStatus.textContent = error.message;
+    } finally {
+      setTimeout(updateReadings, 2000);
+    }
+  }
+  updateReadings();
+
+  const relayLamp = document.querySelector("#relay-lamp");
+  const relayLabel = document.querySelector("#relay-label");
+  const relayToggle = document.querySelector("#relay-toggle");
+  const relayDuration = document.querySelector("#relay-duration");
+  const relayStatus = document.querySelector("#relay-status");
+  let relayOn = null;
+  let relayBusy = false;
+
+  function showRelay(state) {
+    relayOn = state.on;
+    relayLamp.dataset.on = String(relayOn);
+    relayToggle.setAttribute("aria-pressed", String(relayOn));
+    relayToggle.textContent = relayOn ? "Tắt" : "Bật";
+    relayToggle.disabled = false;
+    relayLabel.textContent = relayOn ? "Đang bật" : "Đang tắt";
+    if (relayOn && Number.isFinite(state.off_in_ms)) {
+      relayLabel.textContent += " · tự tắt sau " + Math.ceil(state.off_in_ms / 1000) + " s";
+    }
+  }
+
+  function relayError(message) {
+    relayStatus.dataset.error = "true";
+    relayStatus.textContent = message;
+  }
+
+  async function relayRequest(options) {
+    const response = await fetch("/relay", options);
+    const result = await response.json();
+    if (!response.ok) throw new Error(result.error);
+    return result;
+  }
+
+  async function refreshRelay() {
+    if (!relayBusy) {
+      try {
+        showRelay(await relayRequest());
+        if (relayStatus.dataset.error === "true" || relayStatus.textContent.startsWith("Đang đọc")) {
+          relayStatus.dataset.error = "false";
+          relayStatus.textContent = "Trạng thái đọc từ ESP32.";
+        }
+      } catch (error) {
+        relayError(error.message);
+      }
+    }
+    setTimeout(refreshRelay, relayOn ? 2000 : 5000);
+  }
+
+  relayToggle.addEventListener("click", async () => {
+    if (relayBusy || relayOn === null) return;
+    const on = !relayOn;
+    const body = {on};
+    if (on && relayDuration.value) body.duration_ms = Number(relayDuration.value);
+    relayBusy = true;
+    relayToggle.disabled = true;
+    relayStatus.dataset.error = "false";
+    relayStatus.textContent = on ? "Đang bật relay…" : "Đang tắt relay…";
+    try {
+      showRelay(await relayRequest({
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify(body)
+      }));
+      relayStatus.textContent = "ESP32 đã " + (on ? "bật" : "tắt") + " relay.";
+    } catch (error) {
+      relayError("Gửi thất bại. " + error.message);
+      relayToggle.disabled = relayOn === null;
+    } finally {
+      relayBusy = false;
+    }
+  });
+  refreshRelay();
+</script>
+</html>

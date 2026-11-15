@@ -1,6 +1,7 @@
 """Actuators (outputs) declared in config.json; drivers are imported only when configured."""
 DRIVERS = {
     "servo": ("actuators.servo", "Servo"),
+    "relay": ("actuators.relay", "Relay"),
 }
 
 
