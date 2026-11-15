@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import logging
+import ssl
 import uuid
 from collections.abc import Awaitable, Callable
 
@@ -30,7 +31,7 @@ class MqttTransport:
 
     def __init__(self, host: str, port: int, *, username: str | None = None,
                  password: str | None = None, client_id: str = "backend",
-                 connect_timeout_s: float = 10.0, keepalive: int = 30):
+                 connect_timeout_s: float = 10.0, keepalive: int = 30, tls: bool = False):
         self.host = host
         self.port = port
         self.username = username
@@ -44,6 +45,8 @@ class MqttTransport:
                                    client_id=self.client_id, protocol=mqtt.MQTTv311)
         if username is not None:
             self._client.username_pw_set(username, password)
+        if tls:
+            self._client.tls_set_context(ssl.create_default_context())
         self._client.reconnect_delay_set(1, 10)
         self._subscriptions: list[tuple[str, MessageHandler, int]] = []
         self._callbacks: list[Callable[[bool], None]] = []

@@ -14,7 +14,12 @@ fi
 chown -R mosquitto:mosquitto /mosquitto/data
 rm -f /tmp/dynsec-ready
 
-mosquitto -c /mosquitto/config/mosquitto.conf &
+config=/mosquitto/config/mosquitto.conf
+if [ -n "${MQTT_TLS_CONFIG:-}" ]; then
+    cat "$config" "$MQTT_TLS_CONFIG" > /tmp/mosquitto.conf
+    config=/tmp/mosquitto.conf
+fi
+mosquitto -c "$config" &
 BROKER_PID=$!
 trap 'kill -TERM "$BROKER_PID" 2>/dev/null' TERM INT
 
