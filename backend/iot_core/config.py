@@ -27,6 +27,10 @@ class GatewayConfig:
     client_id_prefix: str = "backend"
     bootstrap_password: str | None = None
     broker_tls: bool = False
+    # Secondary backend (e.g. a teammate working remotely): add devices seen on retained meta
+    # to the local registry instead of ignoring them. Keep off on the main backend, so a
+    # revoked device does not come back from a stale retained message.
+    adopt_devices: bool = False
 
     @classmethod
     def from_env(cls, env_file: str | Path | None = None) -> GatewayConfig:
@@ -54,4 +58,5 @@ class GatewayConfig:
             client_id_prefix=env.get("IOT_CLIENT_ID_PREFIX", cls.client_id_prefix),
             bootstrap_password=env.get("MQTT_BOOTSTRAP_PASSWORD"),
             broker_tls=tls in {"1", "true", "yes"},
+            adopt_devices=env.get("IOT_ADOPT_DEVICES", "0").lower() in {"1", "true", "yes"},
         )

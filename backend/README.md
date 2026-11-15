@@ -34,6 +34,11 @@ Backend và simulator dùng `IOT_BROKER_HOST`, `IOT_BROKER_PORT` và `IOT_BROKER
 được ưu tiên hơn file `.env`. Với `IOT_BROKER_TLS=1`, client xác minh chứng chỉ
 và hostname bằng CA tin cậy của hệ điều hành.
 
+`IOT_ADOPT_DEVICES=1` dành cho backend phụ (thành viên làm từ xa, xem
+[docs/remote-dev.md](../docs/remote-dev.md)): backend tự thêm thiết bị đã duyệt vào
+database riêng từ gói `meta` retained trên broker. Để `0` (mặc định) trên backend chính,
+để thiết bị đã thu hồi không quay lại từ gói retained cũ.
+
 Chạy ba thiết bị giả lập trong terminal khác:
 
 ```powershell
