@@ -36,8 +36,13 @@ ALGORITHM = os.getenv("JWT_ALGORITHM", "HS256")
 EXPIRE_MINUTES = int(os.getenv("JWT_EXPIRE_MINUTES", "60"))
 ACCESS_TOKEN_EXPIRE_MINUTES = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", "30"))
 REFRESH_TOKEN_EXPIRE_DAYS = int(os.getenv("REFRESH_TOKEN_EXPIRE_DAYS", "7"))
-if not SECRET_KEY:
-    raise RuntimeError("JWT_SECRET_KEY environment variable is missing")
+
+
+def _secret_key() -> str:
+    # Checked on use, not at import, so the app imports without JWT config.
+    if not SECRET_KEY:
+        raise RuntimeError("JWT_SECRET_KEY environment variable is missing")
+    return SECRET_KEY
 
 
 # PASSWORD ------------------------------------------------
@@ -79,7 +84,7 @@ def create_token(
 
     token = jwt.encode(
         payload,
-        SECRET_KEY,
+        _secret_key(),
         algorithm=ALGORITHM
     )
 
@@ -90,7 +95,7 @@ def decode_token(token: str):
     try:
         return jwt.decode(
             token,
-            SECRET_KEY,
+            _secret_key(),
             algorithms=[ALGORITHM]
         )
     except JWTError:

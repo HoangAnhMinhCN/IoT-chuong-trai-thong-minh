@@ -12,14 +12,14 @@ load_dotenv(ENV_FILE)
 
 DATABASE_URL = os.getenv("DATABASE_URL")
 
-if not DATABASE_URL:
-    raise RuntimeError("DATABASE_URL is not configured in app/.env")
-
+# Without DATABASE_URL the app still imports (tests, devs without MySQL):
+# the gateway falls back to iot_core's SQLite stores, and MySQL-backed
+# features fail when used instead of at import time.
 engine = create_engine(
     DATABASE_URL,
     pool_pre_ping=True,
     pool_recycle=3600,
-)
+) if DATABASE_URL else None
 
 SessionLocal = sessionmaker(
     autocommit=False,

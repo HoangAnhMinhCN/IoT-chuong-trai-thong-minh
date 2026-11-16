@@ -27,8 +27,9 @@ from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 
-from .database import SessionLocal, get_db, init_db
+from .database import DATABASE_URL, SessionLocal, get_db, init_db
 from .database import test_db_connection
+from .storage_mysql import MySQLDeviceRegistry, MySQLTelemetryStore
 from .schemas import (
     UserRegisterSchema,
     LoginSchema,
@@ -65,25 +66,29 @@ async def lifespan(app: FastAPI):
     else:
         print("Database is unavailable.")
     env_file = os.environ.get("IOT_ENV_FILE", str(Path(__file__).resolve().parents[2] / "app/.env"))
-    async with DeviceGateway.from_config(GatewayConfig.from_env(env_file)) as gateway:
+    # MySQL stores when DATABASE_URL is set; otherwise iot_core's default SQLite stores.
+    storage = ({"registry": MySQLDeviceRegistry(), "telemetry": MySQLTelemetryStore()}
+               if DATABASE_URL else {})
+    async with DeviceGateway.from_config(GatewayConfig.from_env(env_file), **storage) as gateway:
         app.state.gateway = gateway
         app.state.firmware_jobs = {}
         app.state.firmware_tasks = set()
         app.state.ota_listeners = set()
-         # Start scheduled event dispatcher
+         # Start scheduled event dispatcher (schedules live in MySQL only)
         scheduler_task = asyncio.create_task(
             scheduler.scheduler_loop(app)
-        )
+        ) if DATABASE_URL else None
         try:
             yield
         finally:
             # Stop scheduler
-            scheduler_task.cancel()
+            if scheduler_task is not None:
+                scheduler_task.cancel()
 
-            await asyncio.gather(
-                scheduler_task,
-                return_exceptions=True
-            )
+                await asyncio.gather(
+                    scheduler_task,
+                    return_exceptions=True
+                )
             tasks = list(app.state.firmware_tasks)
             for task in tasks:
                 task.cancel()
