@@ -2,12 +2,15 @@ from __future__ import annotations
 
 import asyncio
 import re
+import ssl
 import threading
 from types import SimpleNamespace
 
 import pytest
 
 from iot_core import transport as module
+from iot_core.config import GatewayConfig
+from iot_core.gateway import DeviceGateway
 
 
 class FakePaho:
@@ -19,6 +22,9 @@ class FakePaho:
 
     def username_pw_set(self, *args):
         pass
+
+    def tls_set_context(self, context):
+        self.tls_context = context
 
     def reconnect_delay_set(self, *args):
         assert args == (1, 10)
@@ -51,6 +57,29 @@ class FakePaho:
         # Exercise the paho callback arriving before publish() returns its mid.
         self.on_publish(self, None, self.mid, None, None)
         return SimpleNamespace(rc=0, mid=self.mid)
+
+
+def test_gateway_broker_endpoint_defaults_and_local_overrides(monkeypatch, tmp_path):
+    monkeypatch.setattr(module.mqtt, 'Client', FakePaho)
+    for key in ('IOT_BROKER_HOST', 'IOT_BROKER_PORT', 'IOT_BROKER_TLS'):
+        monkeypatch.delenv(key, raising=False)
+    env_file = tmp_path / 'deployment.env'
+    env_file.write_text('IOT_BROKER_HOST=127.0.0.1\nIOT_BROKER_PORT=1883\nIOT_BROKER_TLS=0\n')
+    transport = DeviceGateway.from_config(GatewayConfig.from_env(env_file)).transport
+    assert (transport.host, transport.port) == ('127.0.0.1', 1883)
+    assert not hasattr(transport._client, 'tls_context')
+
+    monkeypatch.setenv('IOT_BROKER_HOST', 'mqtt.example.com')
+    monkeypatch.setenv('IOT_BROKER_PORT', '20883')
+    monkeypatch.setenv('IOT_BROKER_TLS', '1')
+    transport = DeviceGateway.from_config(GatewayConfig.from_env(env_file)).transport
+    assert (transport.host, transport.port) == ('mqtt.example.com', 20883)
+    assert transport._client.tls_context.verify_mode == ssl.CERT_REQUIRED
+    assert transport._client.tls_context.check_hostname
+
+    monkeypatch.setenv('IOT_BROKER_TLS', 'typo')
+    with pytest.raises(ValueError, match='IOT_BROKER_TLS'):
+        GatewayConfig.from_env(env_file)
 
 
 async def test_callback_order_thread_handoff_and_publish(monkeypatch, caplog):

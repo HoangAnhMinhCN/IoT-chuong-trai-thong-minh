@@ -1,0 +1,16 @@
+services:
+  mosquitto:
+    environment:
+      MQTT_TLS_CONFIG: /mosquitto/tls-listener.conf
+    ports: !override
+      - "127.0.0.1:1883:1883"
+      - "${IOT_LAN_BIND_IP:?set the laptop IP reachable by ESP32}:1883:1883"
+      - "${IOT_TUNNEL_BIND_IP:?set the local WireGuard IPv4}:${IOT_TUNNEL_PORT:?set the forwarded TCP port}:8883"
+    volumes:
+      - ./mosquitto/tls-listener.conf:/mosquitto/tls-listener.conf:ro
+      - mosquitto-tls:/mosquitto/tls:ro
+
+volumes:
+  mosquitto-tls:
+    external: true
+    name: iot-mqtt-tls

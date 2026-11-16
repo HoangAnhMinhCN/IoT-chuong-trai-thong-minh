@@ -146,12 +146,22 @@ Envelope `id` của lệnh dùng làm mã ghép phản hồi. Thiết bị bỏ 
 | `read` | `{"sensor": "room"}` hoặc `{}` (tất cả) | giống `data` của telemetry |
 | `set_interval` | `{"seconds": 10}` (1–3600) | `{"interval_s": 10}`; thiết bị lưu vào flash |
 | `reboot` | — | `{}`; thiết bị trả lời, publish `offline` (`reboot`), rồi reset sau ~1 s |
-| `servo_set` | `{"name": "servo", "angle": 90}` (0–180; `name` bỏ được khi chỉ có 1 actuator) | trạng thái servo; dừng chuỗi góc nếu đang chạy |
+| `actuator_state` | `{"name": "relay"}` hoặc `{}` (tất cả) | trạng thái 1 actuator, hoặc `{"servo": {…}, "relay": {…}}`; chỉ đọc |
+| `servo_set` | `{"name": "servo", "angle": 90}` (0–180; `name` bỏ được khi chỉ có 1 servo) | trạng thái servo; dừng chuỗi góc nếu đang chạy |
 | `servo_sequence` | `{"name": "servo", "run": true, "angles": [0, 20, …, 180], "step_ms": 1000}` (`angles`, `step_ms` tùy chọn; `run: false` để dừng) | trạng thái servo |
 
 Trạng thái servo: `{"angle": 40, "running": true, "angles": [0, 20, …, 180], "step_ms": 1000}`.
 Chuỗi góc chạy bằng hardware timer trên thiết bị (không phụ thuộc kết nối mạng) và lặp vô hạn; cấu hình
 khởi động nằm trong `config.json` (`sequence.autostart`). Thay đổi bằng lệnh không lưu qua lần khởi động lại.
+
+| Lệnh | `args` | `result` |
+| --- | --- | --- |
+| `relay_set` | `{"name": "relay", "on": true, "duration_ms": 5000}` (`duration_ms` tùy chọn, 100–86400000, chỉ khi bật; `name` bỏ được khi chỉ có 1 relay) | trạng thái relay |
+
+Trạng thái relay: `{"on": true, "off_in_ms": 4200}` (`off_in_ms` chỉ có khi đang hẹn tự tắt).
+Cấu hình: `{"driver": "relay", "name": "relay", "pin": 25, "active_low": false, "initial": false, "max_on_ms": 0}`.
+`active_low: true` cho module relay kích mức thấp. Khi khởi động relay luôn về `initial` (mặc định tắt);
+`max_on_ms` > 0 giới hạn thời gian bật tối đa. Gửi lệnh `servo_*` tới relay (hoặc ngược lại) trả `actuator_not_found`.
 
 ### Nạp code qua Wi-Fi (OTA)
 
@@ -197,9 +207,9 @@ Chế độ `AUTH_MODE=none` (giống demo cũ) bỏ toàn bộ phần này: bro
 
 ## 9. Giới hạn đã biết
 
-- Không có TLS: ai nghe được mạng LAN đều thấy mật khẩu và dữ liệu. Chỉ dùng trên LAN phát triển tin cậy.
+- ESP32 kết nối MQTT trực tiếp qua LAN phát triển tin cậy bằng plaintext. Backend từ xa có thể kết nối qua TLS bằng listener trong `deployment/compose.tunnel.yaml`.
 - `hw_id` là địa chỉ MAC, có thể bị giả mạo. Vì vậy mặc định cần admin duyệt; `AUTO_APPROVE` chỉ dành cho phát triển.
 - Tài khoản `bootstrap` dùng chung: lộ mật khẩu này chỉ cho phép gửi yêu cầu đăng ký và đọc trạng thái duyệt, không đọc được mật khẩu hay dữ liệu thiết bị khác. Thiết bị bootstrap có thể gửi request mang `hw_id` của máy khác; vì vậy admin duyệt theo `hw_id` in ra trên serial của board.
 - ESP32 dùng `umqtt.simple` với clean session: lệnh gửi khi thiết bị offline sẽ mất.
-- OTA chỉ được bảo vệ bởi ACL của broker (chỉ backend publish được `cmd`); chưa ký manifest, chưa TLS.
+- OTA dựa vào ACL của broker (chỉ backend publish được `cmd`). Với cấu hình tunnel, TLS bảo vệ kết nối từ backend tới broker. Manifest chưa có chữ ký.
   Ai có tài khoản `backend` là nạp được code vào thiết bị.

@@ -66,21 +66,32 @@ def set_interval(ctx, args):
     return {"interval_s": seconds}
 
 
-def _actuator(ctx, args):
+def _actuator(ctx, args, driver=None):
     name = args.get("name")
     if "name" in args and (not isinstance(name, str) or not name):
         raise CommandError(p.ERR_BAD_ARGS, "name must be a nonempty string")
-    actuator = ctx.actuator(name)
+    actuator = ctx.actuator(name, driver)
     if actuator is None:
+        kind = driver or "actuator"
         raise CommandError(p.ERR_ACTUATOR_NOT_FOUND,
-                           "no actuator '" + str(name) + "'" if name else "name required")
+                           "no " + kind + " '" + str(name) + "'" if name else
+                           "name required (not exactly one " + kind + ")")
     return actuator
+
+
+@register("actuator_state")
+def actuator_state(ctx, args):
+    """Read-only: current state of one actuator, or of all of them by name."""
+    _args(args, ("name",))
+    if "name" in args:
+        return _actuator(ctx, args).state()
+    return {actuator.name: actuator.state() for actuator in ctx.actuators}
 
 
 @register("servo_set")
 def servo_set(ctx, args):
     _args(args, ("name", "angle"))
-    servo = _actuator(ctx, args)
+    servo = _actuator(ctx, args, "servo")
     try:
         servo.set_angle(args.get("angle"))
     except ValueError as exc:
@@ -91,7 +102,7 @@ def servo_set(ctx, args):
 @register("servo_sequence")
 def servo_sequence(ctx, args):
     _args(args, ("name", "run", "angles", "step_ms"))
-    servo = _actuator(ctx, args)
+    servo = _actuator(ctx, args, "servo")
     run = args.get("run", True)
     if type(run) is not bool:
         raise CommandError(p.ERR_BAD_ARGS, "run must be true or false")
@@ -103,6 +114,17 @@ def servo_sequence(ctx, args):
     except ValueError as exc:
         raise CommandError(p.ERR_BAD_ARGS, str(exc))
     return servo.state()
+
+
+@register("relay_set")
+def relay_set(ctx, args):
+    _args(args, ("name", "on", "duration_ms"))
+    relay = _actuator(ctx, args, "relay")
+    try:
+        relay.set(args.get("on"), args.get("duration_ms"))
+    except ValueError as exc:
+        raise CommandError(p.ERR_BAD_ARGS, str(exc))
+    return relay.state()
 
 
 def _ota_call(fn):

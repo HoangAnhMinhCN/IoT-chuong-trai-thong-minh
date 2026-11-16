@@ -2,11 +2,9 @@
 from __future__ import annotations
 
 import json
-from dataclasses import asdict, is_dataclass
+from dataclasses import asdict
 from datetime import datetime, timezone
 from enum import Enum
-
-
 
 from .models import SensorSpec
 
@@ -15,31 +13,14 @@ def utc(value: datetime) -> str:
     return value.astimezone(timezone.utc).isoformat()
 
 
-def encode(value):
-    if isinstance(value, datetime):
-        return value.isoformat()
-
-    if isinstance(value, Enum):
-        return value.value
-
-    if is_dataclass(value) and not isinstance(value, type):
-        return asdict(value)
-
-    raise TypeError(
-        f"Object of type {type(value).__name__} "
-        "is not JSON serializable"
-    )
-
-def dumps(value):
-    if is_dataclass(value) and not isinstance(value, type):
-        value = asdict(value)
-
-    return json.dumps(
-        value,
-        default=encode,
-        ensure_ascii=False
-    )
-
+def dumps(value: object) -> str:
+    def encode(item: object):
+        if isinstance(item, datetime):
+            return utc(item)
+        if isinstance(item, Enum):
+            return item.value
+        raise TypeError(type(item).__name__)
+    return json.dumps(asdict(value), default=encode, ensure_ascii=False)
 
 
 def load_row(raw: str, cls):

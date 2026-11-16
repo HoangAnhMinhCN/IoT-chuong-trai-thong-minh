@@ -12,10 +12,21 @@ def reset():
 
 class Pin:
     IN = 0
-    PULL_UP = 1
+    OUT = 1
+    PULL_UP = 2
 
-    def __init__(self, pin, *args):
+    def __init__(self, pin, mode=None, pull=None, *, value=None):
         self.pin = pin
+        self.mode = mode
+        self.pull = pull
+        self.values = []
+        if value is not None:
+            self.values.append(value)
+
+    def value(self, v=None):
+        if v is not None:
+            self.values.append(v)
+        return self.values[-1] if self.values else 0
 
 
 class ADC:

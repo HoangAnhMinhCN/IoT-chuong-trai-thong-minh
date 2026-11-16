@@ -29,10 +29,20 @@ telemetry, trạng thái, đăng ký và cập nhật thiết bị. API không t
 hoặc hash của đăng ký. Đổi file cấu hình bằng biến `IOT_ENV_FILE`;
 `IOT_DB_PATH` mặc định là `data/iot.sqlite3` (tính từ thư mục chạy lệnh).
 
+Backend và simulator dùng `IOT_BROKER_HOST`, `IOT_BROKER_PORT` và `IOT_BROKER_TLS`
+để kết nối broker. Mặc định là `127.0.0.1`, `1883` và `0`. Biến trong terminal
+được ưu tiên hơn file `.env`. Với `IOT_BROKER_TLS=1`, client xác minh chứng chỉ
+và hostname bằng CA tin cậy của hệ điều hành.
+
+`IOT_ADOPT_DEVICES=1` dành cho backend phụ (thành viên làm từ xa, xem
+[docs/remote-dev.md](../docs/remote-dev.md)): backend tự thêm thiết bị đã duyệt vào
+database riêng từ gói `meta` retained trên broker. Để `0` (mặc định) trên backend chính,
+để thiết bị đã thu hồi không quay lại từ gói retained cũ.
+
 Chạy ba thiết bị giả lập trong terminal khác:
 
 ```powershell
-.venv\Scripts\python.exe tools/sim_device.py --count 3 --env ../deployment/.env
+.venv\Scripts\python.exe tools/sim_device.py --count 3
 ```
 
 Simulator lưu định danh/mật khẩu trong `data/sim/`, gửi yêu cầu mỗi 10 giây.

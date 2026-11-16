@@ -24,8 +24,8 @@ from .errors import (CommandFailed, CommandTimeout, DeviceNotFound, DeviceOfflin
 from .models import (Device, Readings, Registration, RegistrationStatus, SensorSpec,
                      StatusEvent, TelemetryRecord)
 from .provisioning import handle_request, reply
-from .registry import MySQLDeviceRegistry
-from .telemetry import MySQLTelemetryStore
+from .registry import DeviceRegistry
+from .telemetry import TelemetryStore
 from .transport import MqttTransport
 
 T = TypeVar("T")
@@ -35,7 +35,7 @@ Unsubscribe = Callable[[], None]
 
 class DeviceGateway:
     def __init__(self, config: GatewayConfig, *, transport: MqttTransport,
-                 registry: MySQLDeviceRegistry, telemetry: MySQLTelemetryStore, broker_auth: BrokerAuth):
+                 registry: DeviceRegistry, telemetry: TelemetryStore, broker_auth: BrokerAuth):
         """Dependencies are injected so a real server can swap storage or broker auth."""
         self.config = config
         self.transport = transport
@@ -47,44 +47,20 @@ class DeviceGateway:
         self._provision_lock = asyncio.Lock()
         self._started = False
 
-
-        
     @classmethod
     def from_config(cls, config: GatewayConfig) -> DeviceGateway:
-        """Default wiring: paho transport, MySQL registry + telemetry."""
-
+        """Default wiring: paho transport, SQLite registry + telemetry, NoAuth or DynSecAuth by auth_mode."""
         from .broker_auth import DynSecAuth, NoAuth
         from .config import AuthMode
-
-        transport = MqttTransport(
-            config.broker_host,
-            config.broker_port,
-            username=config.username,
-            password=config.password,
-            client_id=config.client_id_prefix,
-            connect_timeout_s=config.connect_timeout_s
-        )
-
-        registry = MySQLDeviceRegistry()
-
-        telemetry = MySQLTelemetryStore(
-            keep_per_device=10_000
-        )
-
-        broker_auth = (
-            DynSecAuth(transport)
-            if config.auth_mode == AuthMode.DYNSEC
-            else NoAuth()
-        )
-
-        return cls(
-            config,
-            transport=transport,
-            registry=registry,
-            telemetry=telemetry,
-            broker_auth=broker_auth
-        )
-
+        from .registry import SqliteDeviceRegistry
+        from .telemetry import SqliteTelemetryStore
+        transport = MqttTransport(config.broker_host, config.broker_port,
+                                  username=config.username, password=config.password,
+                                  client_id=config.client_id_prefix, connect_timeout_s=config.connect_timeout_s,
+                                  tls=config.broker_tls)
+        return cls(config, transport=transport, registry=SqliteDeviceRegistry(config.db_path),
+                   telemetry=SqliteTelemetryStore(config.db_path),
+                   broker_auth=DynSecAuth(transport) if config.auth_mode == AuthMode.DYNSEC else NoAuth())
 
     # Lifecycle -------------------------------------------------------------
     async def start(self) -> None:
@@ -350,10 +326,17 @@ class DeviceGateway:
             await handle_request(self, info.key, data)
             return
         device = await self.registry.get_device(info.key)
+        now = datetime.now(timezone.utc)
+        if device is None and self.config.adopt_devices and info.kind == protocol.META:
+            # Remote/secondary backend: learn approved devices from their retained meta. Only the
+            # device itself (or a backend account) may publish there, per the broker ACL.
+            hw_id = data.get("hw_id")
+            if isinstance(hw_id, str) and hw_id:
+                device = Device(device_id=info.key, hw_id=hw_id, name=info.key, registered_at=now)
+                logging.getLogger("iot_core").info("Adopted device %s from meta", info.key)
         if device is None:
             logging.getLogger("iot_core").debug("Unknown device on %s", topic)
             return
-        now = datetime.now(timezone.utc)
         if info.kind == protocol.STATUS:
             if data.get("state") not in ("online", "offline"):
                 logging.getLogger("iot_core").warning("Invalid status on %s", topic)

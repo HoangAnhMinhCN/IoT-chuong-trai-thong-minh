@@ -6,8 +6,10 @@ import base64
 import hashlib
 import json
 import logging
+import os
 from pathlib import Path
 import secrets
+import ssl
 import sys
 import threading
 import time
@@ -30,7 +32,8 @@ COMMANDS = ["ping", "get_info", "read", "set_interval", "reboot",
 class SimDevice:
     def __init__(self, hw_id: str, host: str, port: int, bootstrap_password: str | None,
                  state_dir: str | Path, retry_s: float = 10, interval_s: int = 10, auth: bool = True,
-                 confirm_delay_s: float = 3, reboot_delay_s: float = 1):
+                 confirm_delay_s: float = 3, reboot_delay_s: float = 1,
+                 tls_context: ssl.SSLContext | None = None):
         self.hw_id = hw_id
         self.host = host
         self.port = port
@@ -39,6 +42,7 @@ class SimDevice:
         self.retry_s = retry_s
         self.interval_s = interval_s
         self.auth = auth
+        self.tls_context = tls_context
         self.state_dir.mkdir(parents=True, exist_ok=True)
         self._path = self.state_dir / f"{hw_id}.json"
         state = json.loads(self._path.read_text()) if self._path.exists() else {}
@@ -308,6 +312,8 @@ class SimDevice:
                                        client_id=self.device_id or self.hw_id,
                                        clean_session=True, protocol=mqtt.MQTTv311)
             self._client.connect_timeout = 3
+            if self.tls_context is not None:
+                self._client.tls_set_context(self.tls_context)
             if self.auth:
                 self._client.username_pw_set(self.device_id or "bootstrap",
                                              self.password if self._registered else self.bootstrap_password)
@@ -361,15 +367,16 @@ class SimDevice:
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--count", type=int, default=1)
-    parser.add_argument("--env", default="../deployment/.env")
+    parser.add_argument("--env", default=os.environ.get("IOT_ENV_FILE", "../deployment/.env"))
     parser.add_argument("--state-dir", default="data/sim")
     parser.add_argument("--confirm-delay", type=float, default=3)
     parser.add_argument("--fail-next-update", action="store_true")
     args = parser.parse_args()
     config = GatewayConfig.from_env(args.env)
+    tls_context = ssl.create_default_context() if config.broker_tls else None
     devices = [SimDevice(f"51a{i:09x}", config.broker_host, config.broker_port,
                          config.bootstrap_password, args.state_dir, auth=config.auth_mode == AuthMode.DYNSEC,
-                         confirm_delay_s=args.confirm_delay)
+                         confirm_delay_s=args.confirm_delay, tls_context=tls_context)
                for i in range(1, args.count + 1)]
     try:
         for device in devices:
