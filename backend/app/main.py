@@ -11,16 +11,41 @@ from dataclasses import asdict, is_dataclass
 from datetime import datetime, timezone
 from uuid import uuid4
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, Optional
 
-from fastapi import FastAPI, HTTPException, Query, Request
+
+from fastapi import FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.encoders import jsonable_encoder
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
+from fastapi import Depends
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from pydantic import BaseModel, Field
+
+
+from sqlalchemy.orm import Session
+
+
+from .database import DATABASE_URL, ENV_FILE, SessionLocal, get_db, init_db
+from .database import test_db_connection
+from .storage_mysql import MySQLDeviceRegistry, MySQLTelemetryStore
+from .schemas import (
+    UserRegisterSchema,
+    LoginSchema,
+    ChangePasswordSchema,
+    TokenResponse,
+    UserResponse,
+    UserUpdateSchema,
+)
+from .services import alert, audit, barn, user, auth, command, scheduler
 from iot_core import (BrokerAuthError, CommandFailed, CommandTimeout, DeviceGateway,
                       DeviceNotFound, DeviceOffline, GatewayConfig, InvalidState,
                       RegistrationNotFound, RegistrationStatus)
+
+from . import models
+
+from . import schemas
 
 
 def public(value: Any) -> Any:
@@ -36,15 +61,34 @@ def public(value: Any) -> Any:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    env_file = os.environ.get("IOT_ENV_FILE", str(Path(__file__).resolve().parents[2] / "deployment/.env"))
-    async with DeviceGateway.from_config(GatewayConfig.from_env(env_file)) as gateway:
+    if test_db_connection():
+        print("Database is ready.")
+    else:
+        print("Database is unavailable.")
+    env_file = str(ENV_FILE)  # deployment/.env (or IOT_ENV_FILE), shared with app.database
+    # MySQL stores when DATABASE_URL is set; otherwise iot_core's default SQLite stores.
+    storage = ({"registry": MySQLDeviceRegistry(), "telemetry": MySQLTelemetryStore()}
+               if DATABASE_URL else {})
+    async with DeviceGateway.from_config(GatewayConfig.from_env(env_file), **storage) as gateway:
         app.state.gateway = gateway
         app.state.firmware_jobs = {}
         app.state.firmware_tasks = set()
         app.state.ota_listeners = set()
+         # Start scheduled event dispatcher (schedules live in MySQL only)
+        scheduler_task = asyncio.create_task(
+            scheduler.scheduler_loop(app)
+        ) if DATABASE_URL else None
         try:
             yield
         finally:
+            # Stop scheduler
+            if scheduler_task is not None:
+                scheduler_task.cancel()
+
+                await asyncio.gather(
+                    scheduler_task,
+                    return_exceptions=True
+                )
             tasks = list(app.state.firmware_tasks)
             for task in tasks:
                 task.cancel()
@@ -127,9 +171,98 @@ async def run_firmware_job(app: FastAPI, job: dict, files: dict[str, bytes], wai
     finally:
         job["finished_at"] = datetime.now(timezone.utc).isoformat()
 
+security = HTTPBearer(auto_error=True)
+
+
+def get_current_user(
+    credentials: HTTPAuthorizationCredentials = Depends(security),
+    db: Session = Depends(get_db)
+):
+    return auth.get_current_user(
+        db,
+        credentials.credentials
+    )
+
+
+def require_roles(*roles):
+    def role_checker(
+        current_user: models.User = Depends(get_current_user)
+    ):
+        if current_user.role not in roles:
+            raise HTTPException(
+                status_code=403,
+                detail="Permission denied"
+            )
+
+        return current_user
+
+    return role_checker
+
+
+def check_barn_access(
+    barn_id: str,
+    current_user: models.User,
+    db: Session
+):
+    if current_user.role == "Admin":
+        return True
+
+    assignment = db.query(
+        models.BarnAssignment
+    ).filter(
+        models.BarnAssignment.user_id == current_user.id,
+        models.BarnAssignment.barn_id == barn_id
+    ).first()
+
+    if not assignment:
+        raise HTTPException(
+            status_code=403,
+            detail="You do not have access to this barn"
+        )
+
+    return True
+
+
+def check_device_write_access(
+    device_id: str,
+    db: Session,
+    current_user: models.User
+):
+    device = db.query(
+        models.Device
+    ).filter(
+        models.Device.device_id == device_id
+    ).first()
+
+    if not device:
+        raise HTTPException(
+            status_code=404,
+            detail="Device not found"
+        )
+
+    if current_user.role == "Admin":
+        return device
+
+    if not device.barn_id:
+        raise HTTPException(
+            status_code=409,
+            detail="Device is not assigned to a barn"
+        )
+
+    check_barn_access(device.barn_id, current_user, db)
+
+    return device
 
 @app.post("/devices/{device_id}/firmware", status_code=202)
-async def firmware(request: Request, device_id: str, body: FirmwareBody):
+async def firmware(
+    request: Request,
+    device_id: str,
+    body: FirmwareBody,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user)
+):
+    check_device_write_access(device_id, db, current_user)
+
     try:
         files = {path: base64.b64decode(data, validate=True) for path, data in body.files.items()}
     except (ValueError, binascii.Error) as exc:
@@ -154,7 +287,11 @@ async def firmware(request: Request, device_id: str, body: FirmwareBody):
 
 
 @app.get("/firmware-jobs/{job_id}")
-async def firmware_job(request: Request, job_id: str):
+async def firmware_job(
+    request: Request,
+    job_id: str,
+    current_user: models.User = Depends(get_current_user)
+):
     job = request.app.state.firmware_jobs.get(job_id)
     if job is None:
         raise HTTPException(404, "Unknown firmware job")
@@ -162,90 +299,176 @@ async def firmware_job(request: Request, job_id: str):
 
 
 @app.get("/health")
-async def health(request: Request):
+async def health(
+    request: Request,
+    current_user: models.User = Depends(get_current_user)
+):
     return {"broker_connected": request.app.state.gateway.transport.connected}
 
 
 @app.get("/devices")
-async def devices(request: Request, online: bool | None = None):
+async def devices(
+    request: Request,
+    online: bool | None = None,
+    current_user: models.User = Depends(get_current_user)
+):
     return public(await request.app.state.gateway.list_devices(online))
 
 
 @app.get("/devices/{device_id}")
-async def device(request: Request, device_id: str):
+async def device(
+    request: Request,
+    device_id: str,
+    current_user: models.User = Depends(get_current_user)
+):
     return public(await request.app.state.gateway.get_device(device_id))
 
 
 @app.patch("/devices/{device_id}")
-async def rename(request: Request, device_id: str, body: RenameBody):
+async def rename(
+    request: Request,
+    device_id: str,
+    body: RenameBody,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user)
+):
+    check_device_write_access(device_id, db, current_user)
     return public(await request.app.state.gateway.rename(device_id, body.name))
 
 
 @app.delete("/devices/{device_id}")
-async def revoke(request: Request, device_id: str):
+async def revoke(
+    request: Request,
+    device_id: str,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user)
+):
+    check_device_write_access(device_id, db, current_user)
     await request.app.state.gateway.revoke(device_id)
     return {"ok": True}
 
 
 @app.get("/devices/{device_id}/readings")
-async def readings(request: Request, device_id: str):
+async def readings(
+    request: Request,
+    device_id: str,
+    current_user: models.User = Depends(get_current_user)
+):
     return public(await request.app.state.gateway.read_all(device_id))
 
 
 @app.get("/devices/{device_id}/sensors/{sensor}")
-async def sensor(request: Request, device_id: str, sensor: str):
+async def sensor(
+    request: Request,
+    device_id: str,
+    sensor: str,
+    current_user: models.User = Depends(get_current_user)
+):
     return await request.app.state.gateway.read_sensor(device_id, sensor)
 
 
 @app.post("/devices/{device_id}/commands")
-async def command(request: Request, device_id: str, body: CommandBody):
+async def command(
+    request: Request,
+    device_id: str,
+    body: CommandBody,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user)
+):
+    check_device_write_access(device_id, db, current_user)
     return await request.app.state.gateway.send_command(device_id, body.name, body.args, body.timeout_s)
 
 
 @app.post("/devices/{device_id}/ping")
-async def ping(request: Request, device_id: str):
+async def ping(
+    request: Request,
+    device_id: str,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user)
+):
+    check_device_write_access(device_id, db, current_user)
     return await request.app.state.gateway.ping(device_id)
 
 
 @app.post("/devices/{device_id}/reboot")
-async def reboot(request: Request, device_id: str):
+async def reboot(
+    request: Request,
+    device_id: str,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user)
+):
+    check_device_write_access(device_id, db, current_user)
     await request.app.state.gateway.reboot(device_id)
     return {"ok": True}
 
 
 @app.put("/devices/{device_id}/interval")
-async def interval(request: Request, device_id: str, body: IntervalBody):
+async def interval(
+    request: Request,
+    device_id: str,
+    body: IntervalBody,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user)
+):
+    check_device_write_access(device_id, db, current_user)
     return {"interval_s": await request.app.state.gateway.set_interval(device_id, body.seconds)}
 
 
 @app.get("/devices/{device_id}/telemetry")
-async def telemetry(request: Request, device_id: str, limit: int = Query(100, ge=1), since: datetime | None = None):
+async def telemetry(
+    request: Request,
+    device_id: str,
+    limit: int = Query(100, ge=1),
+    since: datetime | None = None,
+    current_user: models.User = Depends(get_current_user)
+):
     return public(await request.app.state.gateway.telemetry_history(device_id, limit, since))
 
 
 @app.get("/devices/{device_id}/telemetry/latest")
-async def latest(request: Request, device_id: str):
+async def latest(
+    request: Request,
+    device_id: str,
+    current_user: models.User = Depends(get_current_user)
+):
     return public(await request.app.state.gateway.latest_telemetry(device_id))
 
 
 @app.get("/registrations")
-async def registrations(request: Request, status: Literal["pending", "approved", "rejected", "revoked", "all"] = "pending"):
+async def registrations(
+    request: Request,
+    status: Literal["pending", "approved", "rejected", "revoked", "all"] = "pending",
+    current_user: models.User = Depends(get_current_user)
+):
     state = None if status == "all" else RegistrationStatus(status)
     return public(await request.app.state.gateway.list_registrations(state))
 
 
 @app.post("/registrations/{hw_id}/approve")
-async def approve(request: Request, hw_id: str, body: ApproveBody):
+async def approve(
+    request: Request,
+    hw_id: str,
+    body: ApproveBody,
+    current_user: models.User = Depends(require_roles("Admin"))
+):
     return public(await request.app.state.gateway.approve(hw_id, device_id=body.device_id, name=body.name))
 
 
 @app.post("/registrations/{hw_id}/reject")
-async def reject(request: Request, hw_id: str, body: RejectBody):
+async def reject(
+    request: Request,
+    hw_id: str,
+    body: RejectBody,
+    current_user: models.User = Depends(require_roles("Admin"))
+):
     return public(await request.app.state.gateway.reject(hw_id, body.reason))
 
 
 @app.get("/events")
-async def events(request: Request):
+async def events(
+    request: Request,
+    current_user: models.User = Depends(get_current_user)
+):
     gateway = request.app.state.gateway
 
     async def stream():
@@ -273,3 +496,453 @@ async def events(request: Request):
                 unsubscribe()
 
     return StreamingResponse(stream(), media_type="text/event-stream", headers={"Cache-Control": "no-cache"})
+
+
+#Log in, log out, register account, change password
+
+# =========================================
+# WEBSOCKET MANAGER
+# =========================================
+
+class ConnectionManager:
+
+    def __init__(self):
+        self.connections = {}
+
+    async def connect(self, websocket: WebSocket, user_id: str):
+        await websocket.accept()
+
+        self.connections.setdefault(user_id, []).append(websocket)
+
+    def disconnect(self, websocket: WebSocket, user_id: str):
+        connections = self.connections.get(user_id, [])
+
+        if websocket in connections:
+            connections.remove(websocket)
+
+        if not connections:
+            self.connections.pop(user_id, None)
+
+    async def send_to_user(self, user_id: str, data: dict):
+        connections = self.connections.get(user_id, [])
+
+        disconnected = []
+
+        for connection in connections:
+            try:
+                await connection.send_json(data)
+            except Exception:
+                disconnected.append(connection)
+
+        for connection in disconnected:
+            self.disconnect(connection, user_id)
+
+
+manager = ConnectionManager()
+
+# =========================================
+# 1. AUTHENTICATION ENDPOINTS
+# =========================================
+
+@app.post("/auth/login", response_model=schemas.TokenResponse)
+def login(
+    body: schemas.LoginSchema,
+    db: Session = Depends(get_db)
+):
+    return auth.login(db, body)
+
+
+@app.post("/auth/refresh")
+def refresh_token(
+    body: schemas.RefreshTokenSchema,
+    db: Session = Depends(get_db)
+):
+    return auth.refresh_token(db, body)
+
+
+@app.post("/auth/logout")
+def logout(
+    body: schemas.RefreshTokenSchema,
+    current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    return auth.logout(
+        db,
+        body.refresh_token,
+        current_user
+    )
+
+
+@app.put("/me/password")
+def change_password(
+    body: schemas.ChangePasswordSchema,
+    current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    return auth.change_password(
+        db,
+        body,
+        current_user
+    )
+
+# =========================================
+# 2. USER MANAGEMENT
+# =========================================
+
+@app.get("/users", response_model=list[schemas.UserResponse])
+def get_users(
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(require_roles("Admin"))
+):
+    return user.get_users(db)
+
+
+@app.post(
+    "/users",
+    response_model=schemas.UserResponse,
+    status_code=201
+)
+def create_user(
+    body: schemas.UserRegisterSchema,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(require_roles("Admin"))
+):
+    return user.create_user(
+        db,
+        body
+    )
+
+
+@app.patch("/users/{user_id}", response_model=schemas.UserResponse)
+def update_user(
+    user_id: str,
+    body: schemas.UserUpdateSchema,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(require_roles("Admin"))
+):
+    if user_id == current_user.id and body.status == "locked":
+        raise HTTPException(400, "Cannot lock your own account")
+
+    return user.update_user(db, user_id, body)
+
+# =========================================
+# 3. BARN MANAGEMENT
+# =========================================
+
+@app.get("/barns", response_model=list[schemas.BarnResponse])
+def get_barns(
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user)
+):
+    return barn.get_barns(db, current_user)
+
+
+@app.post(
+    "/barns",
+    response_model=schemas.BarnResponse,
+    status_code=201
+)
+def create_barn(
+    body: schemas.BarnCreateSchema,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(require_roles("Admin"))
+):
+    return barn.create_barn(db, body)
+
+
+@app.put("/barns/{barn_id}/assignments")
+def assign_barn(
+    barn_id: str,
+    body: schemas.BarnAssignmentSchema,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(require_roles("Admin"))
+):
+    return barn.assign_users(db, barn_id, body)
+# =========================================
+# 6. COMMANDS
+# =========================================
+
+@app.post("/barns/{barn_id}/commands", status_code=201)
+def send_command(
+    barn_id: str,
+    body: schemas.CommandCreateSchema,
+    request: Request,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user)
+):
+    check_barn_access(
+        barn_id,
+        current_user,
+        db
+    )
+
+    result = command.send_command(
+        db,
+        barn_id,
+        current_user.id,
+        body
+    )
+
+    return {
+        "command_id": result.command_id,
+        "status": result.status
+    }
+
+
+@app.get("/barns/{barn_id}/commands")
+def get_commands(
+    barn_id: str,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user)
+):
+    return command.get_commands(db, barn_id)
+# =========================================
+# 8. ALERTS
+# =========================================
+
+@app.get("/alerts", response_model=list[schemas.AlertResponse])
+def get_alerts(
+    status_filter: Optional[str] = Query(None, alias="status"),
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user)
+):
+    return alert.get_alerts(
+        db,
+        current_user,
+        status_filter
+    )
+
+
+@app.post("/alerts/{alert_id}/ack")
+def acknowledge_alert(
+    alert_id: str,
+    body: schemas.AlertActionSchema,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(
+        require_roles("Admin", "Operator")
+    )
+):
+    return alert.acknowledge_alert(
+        db,
+        alert_id,
+        current_user,
+        body.note
+    )
+
+
+@app.post("/alerts/{alert_id}/close")
+def close_alert(
+    alert_id: str,
+    body: schemas.AlertActionSchema,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(
+        require_roles("Admin", "Operator")
+    )
+):
+    return alert.close_alert(
+        db,
+        alert_id,
+        current_user,
+        body.note
+    )
+# =========================================
+# 9. AUDIT LOGS
+# =========================================
+
+@app.get(
+    "/audit-logs",
+    response_model=list[schemas.AuditLogResponse]
+)
+def get_audit_logs(
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(require_roles("Admin"))
+):
+    return audit.get_audit_logs(db)
+
+# =========================================
+# 10. WEBSOCKET
+# =========================================
+def authenticate_websocket(token: str) -> str:
+    db = SessionLocal()
+
+    try:
+        current_user = auth.get_current_user(db, token)
+        return current_user.id
+
+    finally:
+        db.close()
+
+
+@app.websocket("/ws")
+async def websocket_endpoint(websocket: WebSocket):
+    token = websocket.query_params.get("token")
+
+    if not token:
+        await websocket.close(code=1008)
+        return
+
+    try:
+        user_id = await asyncio.to_thread(
+            authenticate_websocket,
+            token
+        )
+
+    except HTTPException:
+        await websocket.close(code=1008)
+        return
+
+    await manager.connect(websocket, user_id)
+
+    try:
+        while True:
+            await websocket.receive_text()
+
+    except WebSocketDisconnect:
+        pass
+
+    finally:
+        manager.disconnect(websocket, user_id)
+
+
+# =========================================
+# 10. Scheduled Events
+# =========================================
+
+@app.post(
+    "/barns/{barn_id}/scheduled-events",
+    status_code=201,
+    response_model=schemas.ScheduledEventResponse
+)
+def create_scheduled_event(
+    barn_id: str,
+    body: schemas.ScheduledEventCreateSchema,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user)
+):
+    check_barn_access(
+        barn_id,
+        current_user,
+        db
+    )
+
+    device = db.query(models.Device).filter(
+        models.Device.device_id == body.device_id,
+        models.Device.barn_id == barn_id
+    ).first()
+
+    if not device:
+        raise HTTPException(
+            status_code=404,
+            detail="Device not found in this barn"
+        )
+
+    # Require timezone-aware datetime.
+    if body.run_at.tzinfo is None or body.run_at.utcoffset() is None:
+        raise HTTPException(
+            status_code=422,
+            detail="run_at must include a timezone"
+        )
+
+    # Convert to UTC before saving to MySQL.
+    run_at = body.run_at.astimezone(
+        timezone.utc
+    ).replace(tzinfo=None)
+
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+
+    if run_at <= now:
+        raise HTTPException(
+            status_code=422,
+            detail="Scheduled time must be in the future"
+        )
+
+    event = models.ScheduledEvent(
+        barn_id=barn_id,
+        device_id=body.device_id,
+        command_name=body.command_name,
+        args=body.args,
+        run_at=run_at,
+        duration_seconds=body.duration_seconds,
+        status="pending",
+        created_by=current_user.id,
+        repeat_type=body.repeat_type
+    )
+
+    try:
+        db.add(event)
+        db.commit()
+        db.refresh(event)
+
+    except Exception:
+        db.rollback()
+        raise
+
+    return event
+
+@app.get(
+    "/barns/{barn_id}/scheduled-events",
+    response_model=list[schemas.ScheduledEventResponse]
+)
+def get_scheduled_events(
+    barn_id: str,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user)
+):
+    check_barn_access(
+        barn_id,
+        current_user,
+        db
+    )
+
+    return db.query(
+        models.ScheduledEvent
+    ).filter(
+        models.ScheduledEvent.barn_id == barn_id
+    ).order_by(
+        models.ScheduledEvent.run_at.asc()
+    ).all()
+
+
+@app.delete("/scheduled-events/{event_id}")
+def cancel_scheduled_event(
+    event_id: str,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user)
+):
+    event = db.query(
+        models.ScheduledEvent
+    ).filter(
+        models.ScheduledEvent.id == event_id
+    ).first()
+
+    if not event:
+        raise HTTPException(
+            status_code=404,
+            detail="Event not found"
+        )
+
+    check_barn_access(
+        event.barn_id,
+        current_user,
+        db
+    )
+
+    if event.status != "pending":
+        raise HTTPException(
+            status_code=409,
+            detail="Only pending events can be cancelled"
+        )
+
+    event.status = "cancelled"
+
+    db.commit()
+
+    return {
+        "message": "Scheduled event cancelled",
+        "event_id": event.id
+    }
+
+
+
+
+

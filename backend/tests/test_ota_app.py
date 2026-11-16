@@ -100,8 +100,9 @@ async def test_shutdown_cancels_before_gateway_stop(gateway, monkeypatch):
     monkeypatch.setattr(DeviceGateway, 'from_config', lambda _: fake_context())
     monkeypatch.setattr('app.main.GatewayConfig.from_env', lambda _: None)
     async with lifespan(app):
-        _, posted = await http(gateway, 'POST', '/devices/dev/firmware',
-                               {'version': 'v', 'files': {'app.py': 'YWJj'}})
+        status, posted = await http(gateway, 'POST', '/devices/dev/firmware',
+                                    {'version': 'v', 'files': {'app.py': 'YWJj'}})
+        assert status == 202  # fail instead of waiting forever when no job starts
         await entered.wait()
     job = app.state.firmware_jobs[posted['job_id']]
     assert job['state'] == 'failed' and job['finished_at']

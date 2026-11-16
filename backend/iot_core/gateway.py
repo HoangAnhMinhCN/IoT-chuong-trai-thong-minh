@@ -48,8 +48,12 @@ class DeviceGateway:
         self._started = False
 
     @classmethod
-    def from_config(cls, config: GatewayConfig) -> DeviceGateway:
-        """Default wiring: paho transport, SQLite registry + telemetry, NoAuth or DynSecAuth by auth_mode."""
+    def from_config(cls, config: GatewayConfig, *, registry: DeviceRegistry | None = None,
+                    telemetry: TelemetryStore | None = None) -> DeviceGateway:
+        """Default wiring: paho transport, SQLite registry + telemetry, NoAuth or DynSecAuth by auth_mode.
+
+        Pass `registry` / `telemetry` to use other storage (e.g. the app's MySQL stores).
+        """
         from .broker_auth import DynSecAuth, NoAuth
         from .config import AuthMode
         from .registry import SqliteDeviceRegistry
@@ -58,8 +62,9 @@ class DeviceGateway:
                                   username=config.username, password=config.password,
                                   client_id=config.client_id_prefix, connect_timeout_s=config.connect_timeout_s,
                                   tls=config.broker_tls)
-        return cls(config, transport=transport, registry=SqliteDeviceRegistry(config.db_path),
-                   telemetry=SqliteTelemetryStore(config.db_path),
+        return cls(config, transport=transport,
+                   registry=registry if registry is not None else SqliteDeviceRegistry(config.db_path),
+                   telemetry=telemetry if telemetry is not None else SqliteTelemetryStore(config.db_path),
                    broker_auth=DynSecAuth(transport) if config.auth_mode == AuthMode.DYNSEC else NoAuth())
 
     # Lifecycle -------------------------------------------------------------
