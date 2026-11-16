@@ -1,3 +1,5 @@
+from datetime import datetime, timezone
+import uuid
 
 from sqlalchemy import (
     Column,
@@ -14,9 +16,11 @@ from sqlalchemy import (
     UniqueConstraint,
     func
 )
+
 from sqlalchemy.orm import relationship
 
 from .database import Base
+
 
 
 # =========================================
@@ -384,4 +388,64 @@ class AuditLog(Base):
     ts = Column(
         DateTime,
         server_default=func.current_timestamp()
+    )
+
+# =========================================
+# 14. Scheduled Events
+# =========================================
+
+class ScheduledEvent(Base):
+    __tablename__ = "scheduled_events"
+
+    id = Column(
+        String(36),
+        primary_key=True,
+        default=lambda: str(uuid.uuid4())
+    )
+
+    barn_id = Column(
+        String(36),
+        ForeignKey("barns.id"),
+        nullable=False
+    )
+
+    device_id = Column(
+        String(100),
+        nullable=False
+    )
+
+    command_name = Column(
+        String(100),
+        nullable=False
+    )
+
+    args = Column(JSON, nullable=True)
+
+    run_at = Column(DateTime, nullable=False)
+
+    status = Column(
+        String(20),
+        nullable=False,
+        default="pending"
+    )
+
+    error = Column(Text, nullable=True)
+
+    created_by = Column(
+        String(36),
+        ForeignKey("users.id"),
+        nullable=False
+    )
+
+    executed_at = Column(DateTime, nullable=True)
+
+    created_at = Column(
+        DateTime,
+        default=lambda: datetime.now(timezone.utc)
+    )
+
+    repeat_type = Column(
+        String(20),
+        nullable=False,
+        default="once"
     )

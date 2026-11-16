@@ -37,8 +37,7 @@ from .schemas import (
     UserResponse,
     UserUpdateSchema,
 )
-from .services import alert, audit, barn, user, auth, command
-
+from .services import alert, audit, barn, user, auth, command, scheduler
 from iot_core import (BrokerAuthError, CommandFailed, CommandTimeout, DeviceGateway,
                       DeviceNotFound, DeviceOffline, GatewayConfig, InvalidState,
                       RegistrationNotFound, RegistrationStatus)
@@ -65,15 +64,26 @@ async def lifespan(app: FastAPI):
         print("Database is ready.")
     else:
         print("Database is unavailable.")
-    env_file = os.environ.get("IOT_ENV_FILE", str(Path(__file__).resolve().parents[2] / "deployment/.env.example"))
+    env_file = os.environ.get("IOT_ENV_FILE", str(Path(__file__).resolve().parents[2] / "app/.env"))
     async with DeviceGateway.from_config(GatewayConfig.from_env(env_file)) as gateway:
         app.state.gateway = gateway
         app.state.firmware_jobs = {}
         app.state.firmware_tasks = set()
         app.state.ota_listeners = set()
+         # Start scheduled event dispatcher
+        scheduler_task = asyncio.create_task(
+            scheduler.scheduler_loop(app)
+        )
         try:
             yield
         finally:
+            # Stop scheduler
+            scheduler_task.cancel()
+
+            await asyncio.gather(
+                scheduler_task,
+                return_exceptions=True
+            )
             tasks = list(app.state.firmware_tasks)
             for task in tasks:
                 task.cancel()
@@ -156,9 +166,98 @@ async def run_firmware_job(app: FastAPI, job: dict, files: dict[str, bytes], wai
     finally:
         job["finished_at"] = datetime.now(timezone.utc).isoformat()
 
+security = HTTPBearer(auto_error=True)
+
+
+def get_current_user(
+    credentials: HTTPAuthorizationCredentials = Depends(security),
+    db: Session = Depends(get_db)
+):
+    return auth.get_current_user(
+        db,
+        credentials.credentials
+    )
+
+
+def require_roles(*roles):
+    def role_checker(
+        current_user: models.User = Depends(get_current_user)
+    ):
+        if current_user.role not in roles:
+            raise HTTPException(
+                status_code=403,
+                detail="Permission denied"
+            )
+
+        return current_user
+
+    return role_checker
+
+
+def check_barn_access(
+    barn_id: str,
+    current_user: models.User,
+    db: Session
+):
+    if current_user.role == "Admin":
+        return True
+
+    assignment = db.query(
+        models.BarnAssignment
+    ).filter(
+        models.BarnAssignment.user_id == current_user.id,
+        models.BarnAssignment.barn_id == barn_id
+    ).first()
+
+    if not assignment:
+        raise HTTPException(
+            status_code=403,
+            detail="You do not have access to this barn"
+        )
+
+    return True
+
+
+def check_device_write_access(
+    device_id: str,
+    db: Session,
+    current_user: models.User
+):
+    device = db.query(
+        models.Device
+    ).filter(
+        models.Device.device_id == device_id
+    ).first()
+
+    if not device:
+        raise HTTPException(
+            status_code=404,
+            detail="Device not found"
+        )
+
+    if current_user.role == "Admin":
+        return device
+
+    if not device.barn_id:
+        raise HTTPException(
+            status_code=409,
+            detail="Device is not assigned to a barn"
+        )
+
+    check_barn_access(device.barn_id, current_user, db)
+
+    return device
 
 @app.post("/devices/{device_id}/firmware", status_code=202)
-async def firmware(request: Request, device_id: str, body: FirmwareBody):
+async def firmware(
+    request: Request,
+    device_id: str,
+    body: FirmwareBody,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user)
+):
+    check_device_write_access(device_id, db, current_user)
+
     try:
         files = {path: base64.b64decode(data, validate=True) for path, data in body.files.items()}
     except (ValueError, binascii.Error) as exc:
@@ -206,12 +305,25 @@ async def device(request: Request, device_id: str):
 
 
 @app.patch("/devices/{device_id}")
-async def rename(request: Request, device_id: str, body: RenameBody):
+async def rename(
+    request: Request,
+    device_id: str,
+    body: RenameBody,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user)
+):
+    check_device_write_access(device_id, db, current_user)
     return public(await request.app.state.gateway.rename(device_id, body.name))
 
 
 @app.delete("/devices/{device_id}")
-async def revoke(request: Request, device_id: str):
+async def revoke(
+    request: Request,
+    device_id: str,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user)
+):
+    check_device_write_access(device_id, db, current_user)
     await request.app.state.gateway.revoke(device_id)
     return {"ok": True}
 
@@ -227,23 +339,49 @@ async def sensor(request: Request, device_id: str, sensor: str):
 
 
 @app.post("/devices/{device_id}/commands")
-async def command(request: Request, device_id: str, body: CommandBody):
+async def command(
+    request: Request,
+    device_id: str,
+    body: CommandBody,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user)
+):
+    check_device_write_access(device_id, db, current_user)
     return await request.app.state.gateway.send_command(device_id, body.name, body.args, body.timeout_s)
 
 
 @app.post("/devices/{device_id}/ping")
-async def ping(request: Request, device_id: str):
+async def ping(
+    request: Request,
+    device_id: str,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user)
+):
+    check_device_write_access(device_id, db, current_user)
     return await request.app.state.gateway.ping(device_id)
 
 
 @app.post("/devices/{device_id}/reboot")
-async def reboot(request: Request, device_id: str):
+async def reboot(
+    request: Request,
+    device_id: str,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user)
+):
+    check_device_write_access(device_id, db, current_user)
     await request.app.state.gateway.reboot(device_id)
     return {"ok": True}
 
 
 @app.put("/devices/{device_id}/interval")
-async def interval(request: Request, device_id: str, body: IntervalBody):
+async def interval(
+    request: Request,
+    device_id: str,
+    body: IntervalBody,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user)
+):
+    check_device_write_access(device_id, db, current_user)
     return {"interval_s": await request.app.state.gateway.set_interval(device_id, body.seconds)}
 
 
@@ -264,12 +402,22 @@ async def registrations(request: Request, status: Literal["pending", "approved",
 
 
 @app.post("/registrations/{hw_id}/approve")
-async def approve(request: Request, hw_id: str, body: ApproveBody):
+async def approve(
+    request: Request,
+    hw_id: str,
+    body: ApproveBody,
+    current_user: models.User = Depends(require_roles("Admin"))
+):
     return public(await request.app.state.gateway.approve(hw_id, device_id=body.device_id, name=body.name))
 
 
 @app.post("/registrations/{hw_id}/reject")
-async def reject(request: Request, hw_id: str, body: RejectBody):
+async def reject(
+    request: Request,
+    hw_id: str,
+    body: RejectBody,
+    current_user: models.User = Depends(require_roles("Admin"))
+):
     return public(await request.app.state.gateway.reject(hw_id, body.reason))
 
 
@@ -305,74 +453,6 @@ async def events(request: Request):
 
 
 #Log in, log out, register account, change password
-
-security = HTTPBearer(auto_error=True)
-
-
-
-
-
-# =========================================
-# AUTHENTICATION
-# =========================================
-
-def get_current_user(
-    credentials: HTTPAuthorizationCredentials = Depends(security),
-    db: Session = Depends(get_db)
-):
-    return auth.get_current_user(
-        db,
-        credentials.credentials
-    )
-
-
-def require_roles(*roles):
-    def role_checker(
-        current_user: models.User = Depends(get_current_user)
-    ):
-        if current_user.role not in roles:
-            raise HTTPException(
-                status_code=403,
-                detail="Permission denied"
-            )
-
-        return current_user
-
-    return role_checker
-
-
-def check_barn_access(
-    barn_id: str,
-    current_user: models.User,
-    db: Session,
-    write: bool = False
-):
-    if current_user.role == "Admin":
-        return True
-
-    assignment = db.query(
-        models.BarnAssignment
-    ).filter(
-        models.BarnAssignment.user_id == current_user.id,
-        models.BarnAssignment.barn_id == barn_id
-    ).first()
-
-    if not assignment:
-        raise HTTPException(
-            status_code=403,
-            detail="You do not have access to this barn"
-        )
-
-    if write and (
-        current_user.role != "Operator"
-        or assignment.access_level != "Operator"
-    ):
-        raise HTTPException(
-            status_code=403,
-            detail="Write permission required"
-        )
-
-    return True
 
 # =========================================
 # WEBSOCKET MANAGER
@@ -537,7 +617,7 @@ def assign_barn(
 # =========================================
 
 @app.post("/barns/{barn_id}/commands", status_code=201)
-async def send_command(
+def send_command(
     barn_id: str,
     body: schemas.CommandCreateSchema,
     request: Request,
@@ -547,8 +627,7 @@ async def send_command(
     check_barn_access(
         barn_id,
         current_user,
-        db,
-        write=True
+        db
     )
 
     result = command.send_command(
@@ -567,11 +646,8 @@ async def send_command(
 @app.get("/barns/{barn_id}/commands")
 def get_commands(
     barn_id: str,
-    db: Session = Depends(get_db),
-    current_user: models.User = Depends(get_current_user)
+    db: Session = Depends(get_db)
 ):
-    check_barn_access(barn_id, current_user, db)
-
     return command.get_commands(db, barn_id)
 # =========================================
 # 8. ALERTS
@@ -639,6 +715,17 @@ def get_audit_logs(
 # =========================================
 # 10. WEBSOCKET
 # =========================================
+def authenticate_websocket(token: str) -> str:
+    db = SessionLocal()
+
+    try:
+        current_user = auth.get_current_user(db, token)
+        return current_user.id
+
+    finally:
+        db.close()
+
+
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
     token = websocket.query_params.get("token")
@@ -647,44 +734,133 @@ async def websocket_endpoint(websocket: WebSocket):
         await websocket.close(code=1008)
         return
 
-    db = SessionLocal()
-    user_id = None
+    try:
+        user_id = await asyncio.to_thread(
+            authenticate_websocket,
+            token
+        )
+
+    except HTTPException:
+        await websocket.close(code=1008)
+        return
+
+    await manager.connect(websocket, user_id)
 
     try:
-        try:
-            current_user = auth.get_current_user(db, token)
-            user_id = current_user.id
+        while True:
+            await websocket.receive_text()
 
-        except HTTPException:
-            await websocket.close(code=1008)
-            return
-
-        await manager.connect(websocket, user_id)
-
-        try:
-            while True:
-                await websocket.receive_text()
-
-        except WebSocketDisconnect:
-            pass
+    except WebSocketDisconnect:
+        pass
 
     finally:
-        if user_id:
-            manager.disconnect(websocket, user_id)
-
-        db.close()
+        manager.disconnect(websocket, user_id)
 
 
 # =========================================
-# HEALTH CHECK
+# 10. Scheduled Events
 # =========================================
+@app.post("/barns/{barn_id}/scheduled-events", status_code=201)
+def create_scheduled_event(
+    barn_id: str,
+    body: schemas.ScheduledEventCreateSchema,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user)
+):
+    check_barn_access(
+        barn_id,
+        current_user,
+        db
+    )
+    device = db.query(models.Device).filter(
+        models.Device.device_id == body.device_id,
+        models.Device.barn_id == barn_id
+    ).first()
 
-@app.get("/health")
-def health_check():
-    return {
-        "status": "ok",
-        "service": "Smart Livestock IoT API"
-    }
+    if not device:
+        raise HTTPException(
+            status_code=404,
+            detail="Device not found in this barn"
+        )
+    if body.run_at.tzinfo is None:
+        raise HTTPException(
+            422,
+            "run_at must include a timezone"
+        )
+
+    run_at = body.run_at.astimezone(
+        timezone.utc
+    ).replace(tzinfo=None)
+
+    if run_at <= datetime.now(timezone.utc).replace(tzinfo=None):
+        raise HTTPException(
+            422,
+            "Scheduled time must be in the future"
+        )
+
+    event = models.ScheduledEvent(
+        barn_id=barn_id,
+        device_id=body.device_id,
+        command_name=body.command_name,
+        args=body.args,
+        run_at=run_at,
+        status="pending",
+        created_by=current_user.id,
+        repeat_type=body.repeat_type,
+    )
+
+    db.add(event)
+    db.commit()
+    db.refresh(event)
+
+    return event
+
+
+@app.get("/barns/{barn_id}/scheduled-events")
+def get_scheduled_events(
+    barn_id: str,
+    db: Session = Depends(get_db)
+):
+    return db.query(
+        models.ScheduledEvent
+    ).filter(
+        models.ScheduledEvent.barn_id == barn_id
+    ).order_by(
+        models.ScheduledEvent.run_at
+    ).all()
+
+
+@app.delete("/scheduled-events/{event_id}")
+def cancel_scheduled_event(
+    event_id: str,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user)
+):
+    event = db.query(
+        models.ScheduledEvent
+    ).filter(
+        models.ScheduledEvent.id == event_id
+    ).first()
+
+    if not event:
+        raise HTTPException(404, "Event not found")
+
+    check_barn_access(
+        event.barn_id,
+        current_user,
+        db
+    )
+
+    if event.status != "pending":
+        raise HTTPException(
+            409,
+            "Only pending events can be cancelled"
+        )
+
+    event.status = "cancelled"
+    db.commit()
+
+    return {"message": "Scheduled event cancelled"}
 
 
 

@@ -323,3 +323,35 @@ class AuditLogResponse(ORMBase):
 
 class ErrorResponse(BaseModel):
     detail: str
+
+# =========================================
+# 15. Scheluled Events
+# =========================================
+
+class ScheduledEventCreateSchema(BaseModel):
+    device_id: str
+    command_name: str
+    args: dict[str, Any] | None = None
+    run_at: datetime
+
+    repeat_type: Literal[
+        "once",
+        "daily",
+        "weekly",
+        "monthly"
+    ] = "once"
+
+
+class ScheduledEventResponse(BaseModel):
+    id: str
+    barn_id: str
+    device_id: str
+    command_name: str
+    args: dict[str, Any] | None
+    run_at: datetime
+    status: str
+    error: str | None
+    executed_at: datetime | None
+    repeat_type: str
+    
+    model_config = ConfigDict(from_attributes=True)

@@ -24,8 +24,8 @@ from .errors import (CommandFailed, CommandTimeout, DeviceNotFound, DeviceOfflin
 from .models import (Device, Readings, Registration, RegistrationStatus, SensorSpec,
                      StatusEvent, TelemetryRecord)
 from .provisioning import handle_request, reply
-from .registry import DeviceRegistry
-from .telemetry import TelemetryStore
+from .registry import MySQLDeviceRegistry
+from .telemetry import MySQLTelemetryStore
 from .transport import MqttTransport
 
 T = TypeVar("T")
@@ -35,7 +35,7 @@ Unsubscribe = Callable[[], None]
 
 class DeviceGateway:
     def __init__(self, config: GatewayConfig, *, transport: MqttTransport,
-                 registry: DeviceRegistry, telemetry: TelemetryStore, broker_auth: BrokerAuth):
+                 registry: MySQLDeviceRegistry, telemetry: MySQLTelemetryStore, broker_auth: BrokerAuth):
         """Dependencies are injected so a real server can swap storage or broker auth."""
         self.config = config
         self.transport = transport
@@ -47,19 +47,44 @@ class DeviceGateway:
         self._provision_lock = asyncio.Lock()
         self._started = False
 
+
+        
     @classmethod
     def from_config(cls, config: GatewayConfig) -> DeviceGateway:
-        """Default wiring: paho transport, SQLite registry + telemetry, NoAuth or DynSecAuth by auth_mode."""
+        """Default wiring: paho transport, MySQL registry + telemetry."""
+
         from .broker_auth import DynSecAuth, NoAuth
         from .config import AuthMode
-        from .registry import SqliteDeviceRegistry
-        from .telemetry import SqliteTelemetryStore
-        transport = MqttTransport(config.broker_host, config.broker_port,
-                                  username=config.username, password=config.password,
-                                  client_id=config.client_id_prefix, connect_timeout_s=config.connect_timeout_s)
-        return cls(config, transport=transport, registry=SqliteDeviceRegistry(config.db_path),
-                   telemetry=SqliteTelemetryStore(config.db_path),
-                   broker_auth=DynSecAuth(transport) if config.auth_mode == AuthMode.DYNSEC else NoAuth())
+
+        transport = MqttTransport(
+            config.broker_host,
+            config.broker_port,
+            username=config.username,
+            password=config.password,
+            client_id=config.client_id_prefix,
+            connect_timeout_s=config.connect_timeout_s
+        )
+
+        registry = MySQLDeviceRegistry()
+
+        telemetry = MySQLTelemetryStore(
+            keep_per_device=10_000
+        )
+
+        broker_auth = (
+            DynSecAuth(transport)
+            if config.auth_mode == AuthMode.DYNSEC
+            else NoAuth()
+        )
+
+        return cls(
+            config,
+            transport=transport,
+            registry=registry,
+            telemetry=telemetry,
+            broker_auth=broker_auth
+        )
+
 
     # Lifecycle -------------------------------------------------------------
     async def start(self) -> None:
