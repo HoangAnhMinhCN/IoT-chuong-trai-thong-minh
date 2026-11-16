@@ -27,7 +27,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 
-from .database import DATABASE_URL, SessionLocal, get_db, init_db
+from .database import DATABASE_URL, ENV_FILE, SessionLocal, get_db, init_db
 from .database import test_db_connection
 from .storage_mysql import MySQLDeviceRegistry, MySQLTelemetryStore
 from .schemas import (
@@ -65,7 +65,7 @@ async def lifespan(app: FastAPI):
         print("Database is ready.")
     else:
         print("Database is unavailable.")
-    env_file = os.environ.get("IOT_ENV_FILE", str(Path(__file__).resolve().parents[2] / "app/.env"))
+    env_file = str(ENV_FILE)  # deployment/.env (or IOT_ENV_FILE), shared with app.database
     # MySQL stores when DATABASE_URL is set; otherwise iot_core's default SQLite stores.
     storage = ({"registry": MySQLDeviceRegistry(), "telemetry": MySQLTelemetryStore()}
                if DATABASE_URL else {})

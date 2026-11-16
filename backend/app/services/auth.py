@@ -18,7 +18,7 @@ from pathlib import Path
 
 from .. import models
 
-ENV_PATH = Path(__file__).resolve().parent.parent / ".env"
+from ..database import ENV_FILE as ENV_PATH  # deployment/.env (or IOT_ENV_FILE)
 
 if ENV_PATH.exists():
     with open(ENV_PATH, "r", encoding="utf-8") as file:

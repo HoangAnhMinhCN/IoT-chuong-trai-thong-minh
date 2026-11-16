@@ -6,8 +6,11 @@ from dotenv import load_dotenv
 from sqlalchemy import create_engine, text
 from sqlalchemy.orm import declarative_base, sessionmaker
 
-# Load app/.env
-ENV_FILE = Path(__file__).resolve().parent / ".env"
+# Shared config with the broker and iot_core: deployment/.env (or IOT_ENV_FILE)
+ENV_FILE = Path(os.environ.get(
+    "IOT_ENV_FILE",
+    Path(__file__).resolve().parents[2] / "deployment" / ".env",
+))
 load_dotenv(ENV_FILE)
 
 DATABASE_URL = os.getenv("DATABASE_URL")
