@@ -328,11 +328,21 @@ class ErrorResponse(BaseModel):
 # 15. Scheluled Events
 # =========================================
 
+
 class ScheduledEventCreateSchema(BaseModel):
-    device_id: str
-    command_name: str
+    device_id: str = Field(min_length=1, max_length=100)
+    command_name: str = Field(min_length=1, max_length=100)
+
     args: dict[str, Any] | None = None
+
     run_at: datetime
+
+    # Maximum time to wait for MQTT command (seconds)
+    duration_seconds: int = Field(
+        default=10,
+        ge=1,
+        le=86400
+    )
 
     repeat_type: Literal[
         "once",
@@ -347,11 +357,18 @@ class ScheduledEventResponse(BaseModel):
     barn_id: str
     device_id: str
     command_name: str
-    args: dict[str, Any] | None
+
+    args: dict[str, Any] | None = None
+
     run_at: datetime
+    duration_seconds: int | None = None
+
     status: str
-    error: str | None
-    executed_at: datetime | None
+    error: str | None = None
+
+    executed_at: datetime | None = None
+    created_at: datetime | None = None
+
     repeat_type: str
-    
+
     model_config = ConfigDict(from_attributes=True)

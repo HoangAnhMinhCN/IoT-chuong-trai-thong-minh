@@ -420,7 +420,18 @@ class ScheduledEvent(Base):
 
     args = Column(JSON, nullable=True)
 
-    run_at = Column(DateTime, nullable=False)
+    # Scheduled execution time
+    run_at = Column(
+        DateTime,
+        nullable=False
+    )
+
+    # Maximum command waiting time (seconds)
+    duration_seconds = Column(
+        Integer,
+        nullable=True,
+        default=10
+    )
 
     status = Column(
         String(20),
@@ -428,7 +439,10 @@ class ScheduledEvent(Base):
         default="pending"
     )
 
-    error = Column(Text, nullable=True)
+    error = Column(
+        Text,
+        nullable=True
+    )
 
     created_by = Column(
         String(36),
@@ -436,7 +450,11 @@ class ScheduledEvent(Base):
         nullable=False
     )
 
-    executed_at = Column(DateTime, nullable=True)
+    # Command completion time (success or failure)
+    executed_at = Column(
+        DateTime,
+        nullable=True
+    )
 
     created_at = Column(
         DateTime,

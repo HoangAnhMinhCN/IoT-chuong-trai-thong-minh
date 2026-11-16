@@ -802,7 +802,12 @@ async def websocket_endpoint(websocket: WebSocket):
 # =========================================
 # 10. Scheduled Events
 # =========================================
-@app.post("/barns/{barn_id}/scheduled-events", status_code=201)
+
+@app.post(
+    "/barns/{barn_id}/scheduled-events",
+    status_code=201,
+    response_model=schemas.ScheduledEventResponse
+)
 def create_scheduled_event(
     barn_id: str,
     body: schemas.ScheduledEventCreateSchema,
@@ -814,6 +819,7 @@ def create_scheduled_event(
         current_user,
         db
     )
+
     device = db.query(models.Device).filter(
         models.Device.device_id == body.device_id,
         models.Device.barn_id == barn_id
@@ -824,20 +830,25 @@ def create_scheduled_event(
             status_code=404,
             detail="Device not found in this barn"
         )
-    if body.run_at.tzinfo is None:
+
+    # Require timezone-aware datetime.
+    if body.run_at.tzinfo is None or body.run_at.utcoffset() is None:
         raise HTTPException(
-            422,
-            "run_at must include a timezone"
+            status_code=422,
+            detail="run_at must include a timezone"
         )
 
+    # Convert to UTC before saving to MySQL.
     run_at = body.run_at.astimezone(
         timezone.utc
     ).replace(tzinfo=None)
 
-    if run_at <= datetime.now(timezone.utc).replace(tzinfo=None):
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+
+    if run_at <= now:
         raise HTTPException(
-            422,
-            "Scheduled time must be in the future"
+            status_code=422,
+            detail="Scheduled time must be in the future"
         )
 
     event = models.ScheduledEvent(
@@ -846,30 +857,44 @@ def create_scheduled_event(
         command_name=body.command_name,
         args=body.args,
         run_at=run_at,
+        duration_seconds=body.duration_seconds,
         status="pending",
         created_by=current_user.id,
-        repeat_type=body.repeat_type,
+        repeat_type=body.repeat_type
     )
 
-    db.add(event)
-    db.commit()
-    db.refresh(event)
+    try:
+        db.add(event)
+        db.commit()
+        db.refresh(event)
+
+    except Exception:
+        db.rollback()
+        raise
 
     return event
 
-
-@app.get("/barns/{barn_id}/scheduled-events")
+@app.get(
+    "/barns/{barn_id}/scheduled-events",
+    response_model=list[schemas.ScheduledEventResponse]
+)
 def get_scheduled_events(
     barn_id: str,
     db: Session = Depends(get_db),
     current_user: models.User = Depends(get_current_user)
 ):
+    check_barn_access(
+        barn_id,
+        current_user,
+        db
+    )
+
     return db.query(
         models.ScheduledEvent
     ).filter(
         models.ScheduledEvent.barn_id == barn_id
     ).order_by(
-        models.ScheduledEvent.run_at
+        models.ScheduledEvent.run_at.asc()
     ).all()
 
 
@@ -886,7 +911,10 @@ def cancel_scheduled_event(
     ).first()
 
     if not event:
-        raise HTTPException(404, "Event not found")
+        raise HTTPException(
+            status_code=404,
+            detail="Event not found"
+        )
 
     check_barn_access(
         event.barn_id,
@@ -896,15 +924,18 @@ def cancel_scheduled_event(
 
     if event.status != "pending":
         raise HTTPException(
-            409,
-            "Only pending events can be cancelled"
+            status_code=409,
+            detail="Only pending events can be cancelled"
         )
 
     event.status = "cancelled"
+
     db.commit()
 
-    return {"message": "Scheduled event cancelled"}
-
+    return {
+        "message": "Scheduled event cancelled",
+        "event_id": event.id
+    }
 
 
 
