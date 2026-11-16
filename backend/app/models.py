@@ -426,13 +426,6 @@ class ScheduledEvent(Base):
         nullable=False
     )
 
-    # Maximum command waiting time (seconds)
-    duration_seconds = Column(
-        Integer,
-        nullable=True,
-        default=10
-    )
-
     status = Column(
         String(20),
         nullable=False,
@@ -450,12 +443,6 @@ class ScheduledEvent(Base):
         nullable=False
     )
 
-    # Command completion time (success or failure)
-    executed_at = Column(
-        DateTime,
-        nullable=True
-    )
-
     created_at = Column(
         DateTime,
         default=lambda: datetime.now(timezone.utc)
@@ -465,4 +452,14 @@ class ScheduledEvent(Base):
         String(20),
         nullable=False,
         default="once"
+    )
+    duration_seconds = Column(
+        Integer,
+        nullable=True,
+        default=10
+    )
+
+    executed_at = Column(
+        DateTime,
+        nullable=True
     )
