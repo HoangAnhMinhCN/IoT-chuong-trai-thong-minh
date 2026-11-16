@@ -282,7 +282,11 @@ async def firmware(
 
 
 @app.get("/firmware-jobs/{job_id}")
-async def firmware_job(request: Request, job_id: str):
+async def firmware_job(
+    request: Request,
+    job_id: str,
+    current_user: models.User = Depends(get_current_user)
+):
     job = request.app.state.firmware_jobs.get(job_id)
     if job is None:
         raise HTTPException(404, "Unknown firmware job")
@@ -290,17 +294,28 @@ async def firmware_job(request: Request, job_id: str):
 
 
 @app.get("/health")
-async def health(request: Request):
+async def health(
+    request: Request,
+    current_user: models.User = Depends(get_current_user)
+):
     return {"broker_connected": request.app.state.gateway.transport.connected}
 
 
 @app.get("/devices")
-async def devices(request: Request, online: bool | None = None):
+async def devices(
+    request: Request,
+    online: bool | None = None,
+    current_user: models.User = Depends(get_current_user)
+):
     return public(await request.app.state.gateway.list_devices(online))
 
 
 @app.get("/devices/{device_id}")
-async def device(request: Request, device_id: str):
+async def device(
+    request: Request,
+    device_id: str,
+    current_user: models.User = Depends(get_current_user)
+):
     return public(await request.app.state.gateway.get_device(device_id))
 
 
@@ -329,12 +344,21 @@ async def revoke(
 
 
 @app.get("/devices/{device_id}/readings")
-async def readings(request: Request, device_id: str):
+async def readings(
+    request: Request,
+    device_id: str,
+    current_user: models.User = Depends(get_current_user)
+):
     return public(await request.app.state.gateway.read_all(device_id))
 
 
 @app.get("/devices/{device_id}/sensors/{sensor}")
-async def sensor(request: Request, device_id: str, sensor: str):
+async def sensor(
+    request: Request,
+    device_id: str,
+    sensor: str,
+    current_user: models.User = Depends(get_current_user)
+):
     return await request.app.state.gateway.read_sensor(device_id, sensor)
 
 
@@ -386,17 +410,31 @@ async def interval(
 
 
 @app.get("/devices/{device_id}/telemetry")
-async def telemetry(request: Request, device_id: str, limit: int = Query(100, ge=1), since: datetime | None = None):
+async def telemetry(
+    request: Request,
+    device_id: str,
+    limit: int = Query(100, ge=1),
+    since: datetime | None = None,
+    current_user: models.User = Depends(get_current_user)
+):
     return public(await request.app.state.gateway.telemetry_history(device_id, limit, since))
 
 
 @app.get("/devices/{device_id}/telemetry/latest")
-async def latest(request: Request, device_id: str):
+async def latest(
+    request: Request,
+    device_id: str,
+    current_user: models.User = Depends(get_current_user)
+):
     return public(await request.app.state.gateway.latest_telemetry(device_id))
 
 
 @app.get("/registrations")
-async def registrations(request: Request, status: Literal["pending", "approved", "rejected", "revoked", "all"] = "pending"):
+async def registrations(
+    request: Request,
+    status: Literal["pending", "approved", "rejected", "revoked", "all"] = "pending",
+    current_user: models.User = Depends(get_current_user)
+):
     state = None if status == "all" else RegistrationStatus(status)
     return public(await request.app.state.gateway.list_registrations(state))
 
@@ -422,7 +460,10 @@ async def reject(
 
 
 @app.get("/events")
-async def events(request: Request):
+async def events(
+    request: Request,
+    current_user: models.User = Depends(get_current_user)
+):
     gateway = request.app.state.gateway
 
     async def stream():
@@ -646,7 +687,8 @@ def send_command(
 @app.get("/barns/{barn_id}/commands")
 def get_commands(
     barn_id: str,
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user)
 ):
     return command.get_commands(db, barn_id)
 # =========================================
@@ -819,7 +861,8 @@ def create_scheduled_event(
 @app.get("/barns/{barn_id}/scheduled-events")
 def get_scheduled_events(
     barn_id: str,
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user)
 ):
     return db.query(
         models.ScheduledEvent
