@@ -130,7 +130,7 @@ CREATE TABLE `auth_sessions` (
   UNIQUE KEY `jti` (`jti`),
   KEY `idx_user_id` (`user_id`),
   CONSTRAINT `auth_sessions_ibfk_1` FOREIGN KEY (`user_id`) REFERENCES `users` (`id`) ON DELETE CASCADE
-) ENGINE=InnoDB AUTO_INCREMENT=3 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+) ENGINE=InnoDB AUTO_INCREMENT=6 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 /*!40101 SET character_set_client = @saved_cs_client */;
 
 --
@@ -139,7 +139,7 @@ CREATE TABLE `auth_sessions` (
 
 LOCK TABLES `auth_sessions` WRITE;
 /*!40000 ALTER TABLE `auth_sessions` DISABLE KEYS */;
-INSERT INTO `auth_sessions` VALUES (1,'239ae06d-84ba-4f4f-86e2-200dca770fbc','e19fbb1d-91d6-4d16-b6ff-3be09c71c12c','2027-01-25 22:34:50',1),(2,'a7f3b91f-dbc9-4f8a-8fbe-48a60e9da7d3','e19fbb1d-91d6-4d16-b6ff-3be09c71c12c','2027-01-25 22:39:32',1);
+INSERT INTO `auth_sessions` VALUES (1,'239ae06d-84ba-4f4f-86e2-200dca770fbc','e19fbb1d-91d6-4d16-b6ff-3be09c71c12c','2027-01-25 22:34:50',1),(2,'a7f3b91f-dbc9-4f8a-8fbe-48a60e9da7d3','e19fbb1d-91d6-4d16-b6ff-3be09c71c12c','2027-01-25 22:39:32',1),(3,'7b6a9eae-faad-4746-b3e3-d9ea533deb4d','e19fbb1d-91d6-4d16-b6ff-3be09c71c12c','2027-01-26 08:28:08',0),(4,'8bfa3a32-4044-48f6-b71a-0bee9d3b2d19','e19fbb1d-91d6-4d16-b6ff-3be09c71c12c','2027-01-26 10:42:10',0),(5,'77eac318-5d34-466a-bd84-0d1554a0879a','e19fbb1d-91d6-4d16-b6ff-3be09c71c12c','2027-01-26 11:17:21',0);
 /*!40000 ALTER TABLE `auth_sessions` ENABLE KEYS */;
 UNLOCK TABLES;
 
@@ -192,6 +192,7 @@ CREATE TABLE `barns` (
 
 LOCK TABLES `barns` WRITE;
 /*!40000 ALTER TABLE `barns` DISABLE KEYS */;
+INSERT INTO `barns` VALUES ('0','test_barn','1','cow');
 /*!40000 ALTER TABLE `barns` ENABLE KEYS */;
 UNLOCK TABLES;
 
@@ -306,8 +307,8 @@ CREATE TABLE `devices` (
   `mqtt_secret_hash` varchar(255) COLLATE utf8mb4_unicode_ci DEFAULT NULL,
   PRIMARY KEY (`device_id`),
   UNIQUE KEY `hw_id` (`hw_id`),
-  UNIQUE KEY `barn_id` (`barn_id`),
-  CONSTRAINT `devices_ibfk_1` FOREIGN KEY (`barn_id`) REFERENCES `barns` (`id`) ON DELETE SET NULL
+  KEY `barn_id` (`barn_id`),
+  CONSTRAINT `fk_devices_barn` FOREIGN KEY (`barn_id`) REFERENCES `barns` (`id`) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 /*!40101 SET character_set_client = @saved_cs_client */;
 
@@ -317,6 +318,7 @@ CREATE TABLE `devices` (
 
 LOCK TABLES `devices` WRITE;
 /*!40000 ALTER TABLE `devices` DISABLE KEYS */;
+INSERT INTO `devices` VALUES ('test','test','0','ESP32_001','test','test','[]','[]',0,'offline',NULL,NULL,NULL,NULL);
 /*!40000 ALTER TABLE `devices` ENABLE KEYS */;
 UNLOCK TABLES;
 
@@ -353,6 +355,46 @@ CREATE TABLE `registrations` (
 LOCK TABLES `registrations` WRITE;
 /*!40000 ALTER TABLE `registrations` DISABLE KEYS */;
 /*!40000 ALTER TABLE `registrations` ENABLE KEYS */;
+UNLOCK TABLES;
+
+--
+-- Table structure for table `scheduled_events`
+--
+
+DROP TABLE IF EXISTS `scheduled_events`;
+/*!40101 SET @saved_cs_client     = @@character_set_client */;
+/*!50503 SET character_set_client = utf8mb4 */;
+CREATE TABLE `scheduled_events` (
+  `id` varchar(36) COLLATE utf8mb4_unicode_ci NOT NULL,
+  `barn_id` varchar(36) COLLATE utf8mb4_unicode_ci NOT NULL,
+  `device_id` varchar(100) COLLATE utf8mb4_unicode_ci NOT NULL,
+  `command_name` varchar(100) COLLATE utf8mb4_unicode_ci NOT NULL,
+  `args` json DEFAULT NULL,
+  `run_at` datetime NOT NULL,
+  `status` varchar(20) COLLATE utf8mb4_unicode_ci NOT NULL DEFAULT 'pending',
+  `error` text COLLATE utf8mb4_unicode_ci,
+  `created_by` varchar(36) COLLATE utf8mb4_unicode_ci NOT NULL,
+  `created_at` datetime DEFAULT CURRENT_TIMESTAMP,
+  `repeat_type` varchar(20) COLLATE utf8mb4_unicode_ci NOT NULL DEFAULT 'once',
+  `duration_seconds` int DEFAULT '10',
+  `executed_at` datetime DEFAULT NULL,
+  PRIMARY KEY (`id`),
+  KEY `fk_scheduled_events_user` (`created_by`),
+  KEY `idx_scheduled_events_due` (`status`,`run_at`),
+  KEY `idx_scheduled_events_barn` (`barn_id`),
+  CONSTRAINT `fk_scheduled_events_barn` FOREIGN KEY (`barn_id`) REFERENCES `barns` (`id`),
+  CONSTRAINT `fk_scheduled_events_user` FOREIGN KEY (`created_by`) REFERENCES `users` (`id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+/*!40101 SET character_set_client = @saved_cs_client */;
+
+--
+-- Dumping data for table `scheduled_events`
+--
+
+LOCK TABLES `scheduled_events` WRITE;
+/*!40000 ALTER TABLE `scheduled_events` DISABLE KEYS */;
+INSERT INTO `scheduled_events` VALUES ('9b473a26-3496-461c-95f4-22d96fa43992','0','test','fan_on','{\"speed\": 100}','2026-11-16 11:19:00','failed','test','e19fbb1d-91d6-4d16-b6ff-3be09c71c12c','2026-11-16 11:18:33','once',10,'2026-11-16 11:19:00'),('cf989e99-9a7a-4972-8445-c0714def10f9','0','test','fan_on','{\"speed\": 100}','2026-11-16 11:30:00','pending',NULL,'e19fbb1d-91d6-4d16-b6ff-3be09c71c12c','2026-11-16 11:18:03','once',10,NULL);
+/*!40000 ALTER TABLE `scheduled_events` ENABLE KEYS */;
 UNLOCK TABLES;
 
 --
@@ -422,4 +464,4 @@ UNLOCK TABLES;
 /*!40101 SET COLLATION_CONNECTION=@OLD_COLLATION_CONNECTION */;
 /*!40111 SET SQL_NOTES=@OLD_SQL_NOTES */;
 
--- Dump completed on 2026-11-16  5:50:33
+-- Dump completed on 2026-11-16 18:21:52
